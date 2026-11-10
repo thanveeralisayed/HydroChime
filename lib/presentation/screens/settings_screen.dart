@@ -21,6 +21,31 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  static const String _developerPortfolioUrl = 'https://thanveer.vercel.app/';
+
+  Future<void> _copyDeveloperPortfolioUrl() async {
+    final messenger = ScaffoldMessenger.of(context);
+    await Clipboard.setData(
+      const ClipboardData(text: _developerPortfolioUrl),
+    );
+    if (!mounted) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('Portfolio URL copied: $_developerPortfolioUrl'),
+        ),
+      );
+  }
+
+  Future<void> _openDeveloperPortfolio() async {
+    final opened = await ref
+        .read(externalLinkLauncherProvider)
+        .openUrl(Uri.parse(_developerPortfolioUrl));
+    if (opened || !mounted) return;
+    await _copyDeveloperPortfolioUrl();
+  }
+
   Future<void> _editBaselineDialog(UserProfile profile) async {
     await showDialog<void>(
       context: context,
@@ -1007,7 +1032,86 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 36),
+                const SizedBox(height: 28),
+                _buildDivider(palette),
+                const SizedBox(height: 24),
+                // Section 6: About Developer
+                Text(
+                  'ABOUT DEVELOPER',
+                  style: AppTypography.labelMicro(
+                    color: palette.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                InkWell(
+                  key: const Key('developer_portfolio_link'),
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: _openDeveloperPortfolio,
+                  onLongPress: _copyDeveloperPortfolioUrl,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: palette.surfaceCard,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: palette.borderSubtle),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 34,
+                          height: 34,
+                          decoration: BoxDecoration(
+                            color: palette.primaryVital.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            Icons.person_outline,
+                            color: palette.primaryAtmosphere,
+                            size: 18,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Thanveer Ali',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: palette.textPrimary,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                _developerPortfolioUrl,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: palette.primaryAtmosphere,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Icon(
+                          Icons.open_in_new,
+                          color: palette.primaryAtmosphere,
+                          size: 16,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 32),
                 Center(
                   child: Text(
                     'HYDROCHIME • $appVersion',

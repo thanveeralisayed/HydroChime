@@ -7,6 +7,7 @@ import '../../data/database/app_database.dart';
 import '../../data/repositories/intake_log_repository.dart';
 import '../../data/repositories/user_profile_repository.dart';
 import '../../data/repositories/weather_repository.dart';
+import '../../data/services/external_link_launcher.dart';
 import '../../data/services/ip_location_service.dart';
 import '../../data/services/local_notification_service.dart';
 import '../../data/services/location_service.dart';
@@ -65,6 +66,10 @@ final notificationServiceProvider = Provider<NotificationService>((ref) {
 
 final vaultTransferServiceProvider = Provider<VaultTransferService>((ref) {
   return const PlatformVaultTransferService();
+});
+
+final externalLinkLauncherProvider = Provider<ExternalLinkLauncher>((ref) {
+  return const UrlLauncherExternalLinkLauncher();
 });
 
 final locationServiceProvider = Provider<LocationService>((ref) {

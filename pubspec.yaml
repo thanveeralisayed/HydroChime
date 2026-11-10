@@ -48,6 +48,7 @@ dependencies:
   geolocator: ^14.1.2
   package_info_plus: ^10.2.2
   sqflite_common_ffi: ^2.4.6
+  url_launcher: ^6.3.3
 
 dev_dependencies:
   flutter_test:

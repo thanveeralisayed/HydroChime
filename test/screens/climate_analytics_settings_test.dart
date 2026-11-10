@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -9,6 +10,7 @@ import 'package:hydrochime/core/theme/app_theme.dart';
 import 'package:hydrochime/data/database/app_database.dart';
 import 'package:hydrochime/data/repositories/intake_log_repository.dart';
 import 'package:hydrochime/data/repositories/user_profile_repository.dart';
+import 'package:hydrochime/data/services/external_link_launcher.dart';
 import 'package:hydrochime/data/services/ip_location_service.dart';
 import 'package:hydrochime/data/services/local_notification_service.dart';
 import 'package:hydrochime/data/services/location_service.dart';
@@ -153,6 +155,17 @@ class _SpyNotificationService implements NotificationService {
   Future<void> cancelAll() async {}
 }
 
+class _SpyExternalLinkLauncher implements ExternalLinkLauncher {
+  final List<Uri> openedUris = [];
+  bool nextResult = true;
+
+  @override
+  Future<bool> openUrl(Uri uri) async {
+    openedUris.add(uri);
+    return nextResult;
+  }
+}
+
 void main() {
   setUpAll(() {
     sqfliteFfiInit();
@@ -188,6 +201,7 @@ void main() {
     VaultTransferService? vaultTransferService,
     VaultExportService? vaultExportService,
     NotificationService? notificationService,
+    ExternalLinkLauncher? externalLinkLauncher,
   }) {
     return ProviderScope(
       overrides: [
@@ -210,6 +224,8 @@ void main() {
           vaultExportServiceProvider.overrideWithValue(AsyncData(vaultExportService)),
         if (notificationService != null)
           notificationServiceProvider.overrideWithValue(notificationService),
+        if (externalLinkLauncher != null)
+          externalLinkLauncherProvider.overrideWithValue(externalLinkLauncher),
       ],
       child: MaterialApp(
         theme: AppTheme.light,
@@ -989,7 +1005,11 @@ void main() {
 
       // Location sheet makes only 1 weather fetch when switching city
       final callsBeforeLocationSwitch = forecastCalls;
-      await tester.ensureVisible(find.byKey(const Key('settings_location_row')));
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('settings_location_row')),
+        -250,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.pump();
       await tester.tap(find.byKey(const Key('settings_location_row')));
       await tester.pumpAndSettle();
@@ -1075,6 +1095,70 @@ void main() {
       expect(savedProfile.longitude, 72.88);
       expect(requestedCoords, contains((lat: '19.08', lon: '72.88')));
       expect(find.text('Mumbai (IP) • 29°C'), findsOneWidget);
+      expectNoException(tester);
+    });
+
+    testWidgets(
+        'About Developer section opens portfolio link and copies URL fallback when launcher fails',
+        (tester) async {
+      tester.view.physicalSize = const Size(320, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      String? copiedClipboard;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copiedClipboard = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+
+      final linkLauncher = _SpyExternalLinkLauncher();
+      await tester.pumpWidget(
+        buildApp(
+          const SettingsScreen(),
+          externalLinkLauncher: linkLauncher,
+        ),
+      );
+      await settleWhileSaving(tester);
+      await settleAsync(tester);
+
+      final linkFinder = find.byKey(const Key('developer_portfolio_link'));
+      await tester.scrollUntilVisible(
+        linkFinder,
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pump();
+
+      expect(find.text('ABOUT DEVELOPER'), findsOneWidget);
+      expect(find.text('Thanveer Ali'), findsOneWidget);
+      expect(find.text('https://thanveer.vercel.app/'), findsOneWidget);
+      expectNoException(tester);
+
+      // Launches portfolio URL via ExternalLinkLauncher
+      await tester.tap(linkFinder);
+      await settleAsync(tester);
+      expect(
+        linkLauncher.openedUris,
+        [Uri.parse('https://thanveer.vercel.app/')],
+      );
+      expect(copiedClipboard, isNull);
+
+      // Falls back to copying URL when launcher returns false
+      linkLauncher.nextResult = false;
+      await tester.tap(linkFinder);
+      await settleAsync(tester);
+      expect(copiedClipboard, 'https://thanveer.vercel.app/');
+      expect(
+        find.text('Portfolio URL copied: https://thanveer.vercel.app/'),
+        findsOneWidget,
+      );
       expectNoException(tester);
     });
   });
