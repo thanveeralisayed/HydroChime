@@ -1,11 +1,16 @@
 import 'dart:math' as math;
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:sqflite/sqflite.dart';
 import '../../data/database/app_database.dart';
 import '../../data/repositories/intake_log_repository.dart';
 import '../../data/repositories/user_profile_repository.dart';
 import '../../data/repositories/weather_repository.dart';
+import '../../data/services/local_notification_service.dart';
+import '../../data/services/location_service.dart';
 import '../../data/services/vault_export_service.dart';
+import '../../data/services/vault_transfer_service.dart';
 import '../../data/services/weather_api_client.dart';
 import '../../domain/calculators/consistency_calculator.dart';
 import '../../domain/calculators/hydration_calculator.dart';
@@ -53,6 +58,30 @@ final vaultExportServiceProvider =
   return VaultExportService(db);
 });
 
+final notificationServiceProvider = Provider<NotificationService>((ref) {
+  return LocalNotificationService();
+});
+
+final vaultTransferServiceProvider = Provider<VaultTransferService>((ref) {
+  return const PlatformVaultTransferService();
+});
+
+final locationServiceProvider = Provider<LocationService>((ref) {
+  return const GeolocatorLocationService();
+});
+
+final appVersionProvider = FutureProvider<String>((ref) async {
+  try {
+    final info = await PackageInfo.fromPlatform();
+    if (info.version.trim().isNotEmpty) {
+      return 'v${info.version.trim()}';
+    }
+  } on MissingPluginException {
+    // Headless test fallback
+  } catch (_) {}
+  return 'v1.0.0';
+});
+
 class MainTabIndexNotifier extends Notifier<int> {
   @override
   int build() => 0;
@@ -68,13 +97,15 @@ final mainTabIndexProvider =
 });
 
 class CurrentClimateNotifier extends Notifier<ClimateCondition> {
+  static const ClimateCondition initialPlaceholder = ClimateCondition(
+    temperatureCelsius: 31.0,
+    relativeHumidity: 38.0,
+    apparentTemperatureCelsius: 35.2,
+  );
+
   @override
   ClimateCondition build() {
-    return const ClimateCondition(
-      temperatureCelsius: 31.0,
-      relativeHumidity: 38.0,
-      apparentTemperatureCelsius: 35.2,
-    );
+    return initialPlaceholder;
   }
 
   void updateClimate(ClimateCondition newClimate) {
@@ -89,12 +120,14 @@ final currentClimateProvider =
 
 class WeatherSyncState {
   final ClimateCondition condition;
+  final ClimateCondition? previousCondition;
   final DateTime lastUpdated;
   final WeatherDataSource source;
   final bool heatSpikeDetected;
 
   const WeatherSyncState({
     required this.condition,
+    this.previousCondition,
     required this.lastUpdated,
     required this.source,
     this.heatSpikeDetected = false,
@@ -102,77 +135,148 @@ class WeatherSyncState {
 }
 
 class WeatherSyncNotifier extends AsyncNotifier<WeatherSyncState> {
+  ({double lat, double lon})? _lastSyncedCoords;
+  ClimateCondition? _lastObservedCondition;
+  WeatherDataSource? _lastSource;
+
+  bool _isInitialPlaceholder(ClimateCondition c) {
+    const p = CurrentClimateNotifier.initialPlaceholder;
+    return c.temperatureCelsius == p.temperatureCelsius &&
+        c.relativeHumidity == p.relativeHumidity &&
+        c.apparentTemperatureCelsius == p.apparentTemperatureCelsius;
+  }
+
+  bool _coordsDiffer(
+    ({double lat, double lon}) a,
+    ({double lat, double lon}) b,
+  ) {
+    return (a.lat - b.lat).abs() > 0.02 || (a.lon - b.lon).abs() > 0.02;
+  }
+
   @override
   Future<WeatherSyncState> build() async {
     final profile = await ref.watch(userProfileProvider.future);
     final weatherRepo = await ref.watch(weatherRepositoryProvider.future);
 
     final previous = ref.read(currentClimateProvider);
+    final currentCoords = (lat: profile.latitude, lon: profile.longitude);
+    final locationChanged =
+        _lastSyncedCoords != null && _coordsDiffer(_lastSyncedCoords!, currentCoords);
+    final hasPriorBaseline = _lastSyncedCoords != null &&
+        !locationChanged &&
+        _lastObservedCondition != null &&
+        _lastSource != WeatherDataSource.offlineFallback;
+
     final result = await weatherRepo.getOrFetchWeatherWithMeta(
       latitude: profile.latitude,
       longitude: profile.longitude,
     );
+    _lastSyncedCoords = currentCoords;
 
-    if (result.source != WeatherDataSource.offlineFallback && ref.mounted) {
-      ref.read(currentClimateProvider.notifier).updateClimate(result.condition);
+    final shouldReplaceWithOfflineFallback =
+        result.source == WeatherDataSource.offlineFallback &&
+            (locationChanged || _isInitialPlaceholder(previous));
+
+    final shouldUpdateClimate =
+        result.source != WeatherDataSource.offlineFallback ||
+            shouldReplaceWithOfflineFallback;
+
+    final effectiveCondition =
+        shouldUpdateClimate ? result.condition : previous;
+
+    if (shouldUpdateClimate && ref.mounted) {
+      ref.read(currentClimateProvider.notifier).updateClimate(effectiveCondition);
     }
 
     final spike = result.source == WeatherDataSource.liveApi &&
+        hasPriorBaseline &&
         weatherRepo.isHeatSpikeDelta(
-          previous: previous,
-          current: result.condition,
+          previous: _lastObservedCondition!,
+          current: effectiveCondition,
         );
 
+    final priorForState = _lastObservedCondition ?? previous;
+    _lastSource = result.source;
+    if (result.source != WeatherDataSource.offlineFallback) {
+      _lastObservedCondition = effectiveCondition;
+    } else if (locationChanged) {
+      _lastObservedCondition = null;
+    }
+
     return WeatherSyncState(
-      condition: result.source == WeatherDataSource.offlineFallback
-          ? previous
-          : result.condition,
+      condition: effectiveCondition,
+      previousCondition: priorForState,
       lastUpdated: result.updatedAt,
       source: result.source,
       heatSpikeDetected: spike,
     );
   }
 
-  Future<void> refreshWeather({bool forceRefresh = true}) async {
+  Future<WeatherSyncState?> refreshWeather({bool forceRefresh = true}) async {
     final currentData = switch (state) {
       AsyncData(:final value) => value,
       _ => null,
     };
     final ClimateCondition previous =
-        currentData?.condition ?? ref.read(currentClimateProvider);
+        _lastObservedCondition ?? currentData?.condition ?? ref.read(currentClimateProvider);
     final profile = await ref.read(userProfileProvider.future);
     final weatherRepo = await ref.read(weatherRepositoryProvider.future);
+
+    final currentCoords = (lat: profile.latitude, lon: profile.longitude);
+    final locationChanged =
+        _lastSyncedCoords != null && _coordsDiffer(_lastSyncedCoords!, currentCoords);
+    final hasPriorBaseline = _lastSyncedCoords != null &&
+        !locationChanged &&
+        _lastObservedCondition != null &&
+        _lastSource != WeatherDataSource.offlineFallback;
 
     final result = await weatherRepo.getOrFetchWeatherWithMeta(
       latitude: profile.latitude,
       longitude: profile.longitude,
       forceRefresh: forceRefresh,
     );
+    _lastSyncedCoords = currentCoords;
 
-    if (!ref.mounted) return;
+    if (!ref.mounted) return null;
+
+    final shouldReplaceWithOfflineFallback =
+        result.source == WeatherDataSource.offlineFallback &&
+            (locationChanged || _isInitialPlaceholder(previous));
+
+    final shouldUpdateClimate =
+        result.source != WeatherDataSource.offlineFallback ||
+            shouldReplaceWithOfflineFallback;
 
     final effectiveCondition =
-        result.source == WeatherDataSource.offlineFallback
-            ? previous
-            : result.condition;
+        shouldUpdateClimate ? result.condition : previous;
 
-    if (result.source != WeatherDataSource.offlineFallback) {
+    if (shouldUpdateClimate) {
       ref.read(currentClimateProvider.notifier).updateClimate(effectiveCondition);
     }
 
-    final spike = weatherRepo.isHeatSpikeDelta(
-      previous: previous,
-      current: effectiveCondition,
-    );
+    final spike = result.source == WeatherDataSource.liveApi &&
+        hasPriorBaseline &&
+        weatherRepo.isHeatSpikeDelta(
+          previous: previous,
+          current: effectiveCondition,
+        );
 
-    state = AsyncData(
-      WeatherSyncState(
-        condition: effectiveCondition,
-        lastUpdated: result.updatedAt,
-        source: result.source,
-        heatSpikeDetected: spike,
-      ),
+    _lastSource = result.source;
+    if (result.source != WeatherDataSource.offlineFallback) {
+      _lastObservedCondition = effectiveCondition;
+    } else if (locationChanged) {
+      _lastObservedCondition = null;
+    }
+
+    final nextState = WeatherSyncState(
+      condition: effectiveCondition,
+      previousCondition: previous,
+      lastUpdated: result.updatedAt,
+      source: result.source,
+      heatSpikeDetected: spike,
     );
+    state = AsyncData(nextState);
+    return nextState;
   }
 }
 
@@ -211,6 +315,8 @@ class HydrationNotifier extends AsyncNotifier<HydrationState> {
   static const ConsistencyCalculator _consistencyCalculator =
       ConsistencyCalculator();
 
+  DateTime? _lastLoadedDay;
+
   @override
   Future<HydrationState> build() async {
     final intakeRepo = await ref.watch(intakeLogRepositoryProvider.future);
@@ -238,17 +344,17 @@ class HydrationNotifier extends AsyncNotifier<HydrationState> {
     );
 
     final today = DateTime.now();
+    _lastLoadedDay = DateTime(today.year, today.month, today.day);
     final currentVolume = await intakeRepo.getEffectiveVolumeForDate(today);
     final todayLogs = await intakeRepo.getLogsForDate(today);
 
     final startH = userProfile.activeWindowStartHour;
-    final endH = userProfile.activeWindowEndHour > startH
-        ? userProfile.activeWindowEndHour
-        : 22;
+    final endH = userProfile.activeWindowEndHour;
     final hourlyDist = await intakeRepo.getHourlyDistribution(
       date: today,
       startHour: startH,
       endHour: endH,
+      resolveActiveShift: true,
     );
     final hourlyTarget = hourlyDist.isNotEmpty
         ? math.max(1, (breakdown.totalTargetMl / hourlyDist.length).round())
@@ -284,21 +390,55 @@ class HydrationNotifier extends AsyncNotifier<HydrationState> {
     );
   }
 
+  Future<void> refreshIfNewDay({DateTime? now}) async {
+    final current = now ?? DateTime.now();
+    final currentDay = DateTime(current.year, current.month, current.day);
+    if (_lastLoadedDay != null && _lastLoadedDay == currentDay) return;
+    _lastLoadedDay = currentDay;
+    if (!ref.mounted) return;
+    ref.invalidateSelf();
+    await future;
+  }
+
   Future<void> logHydration({
     required int amountMl,
     required BeverageType type,
+    DateTime? timestamp,
   }) async {
     final intakeRepo = await ref.read(intakeLogRepositoryProvider.future);
     final effective = _calculator.calculateEffectiveIntake(amountMl, type);
 
     final log = IntakeLog(
-      timestamp: DateTime.now(),
+      timestamp: timestamp ?? DateTime.now(),
       volumeMl: amountMl,
       beverageType: type,
       effectiveVolumeMl: effective,
     );
 
     await intakeRepo.insertLog(log);
+    if (!ref.mounted) return;
+    ref.invalidateSelf();
+    await future;
+  }
+
+  Future<void> updateLog({
+    required int id,
+    required int volumeMl,
+    required BeverageType type,
+    required DateTime timestamp,
+  }) async {
+    final intakeRepo = await ref.read(intakeLogRepositoryProvider.future);
+    final effective = _calculator.calculateEffectiveIntake(volumeMl, type);
+
+    await intakeRepo.updateLog(
+      IntakeLog(
+        id: id,
+        timestamp: timestamp,
+        volumeMl: volumeMl,
+        beverageType: type,
+        effectiveVolumeMl: effective,
+      ),
+    );
     if (!ref.mounted) return;
     ref.invalidateSelf();
     await future;
@@ -336,10 +476,12 @@ final hydrationNotifierProvider =
 class PacingScheduleState {
   final List<HydrationChimeSlot> upcomingChimes;
   final int recommendedHourlyMl;
+  final bool osSchedulingSupported;
 
   const PacingScheduleState({
     required this.upcomingChimes,
     required this.recommendedHourlyMl,
+    this.osSchedulingSupported = true,
   });
 
   HydrationChimeSlot? get nextChime =>
@@ -350,6 +492,7 @@ final pacingScheduleProvider = FutureProvider<PacingScheduleState>((ref) async {
   const scheduler = NotificationScheduler();
   final profile = await ref.watch(userProfileProvider.future);
   final hydration = await ref.watch(hydrationNotifierProvider.future);
+  final notificationService = ref.watch(notificationServiceProvider);
   final now = DateTime.now();
 
   final chimes = scheduler.computeDailySchedule(
@@ -367,9 +510,18 @@ final pacingScheduleProvider = FutureProvider<PacingScheduleState>((ref) async {
     totalTargetMl: hydration.targetVolumeMl,
   );
 
+  try {
+    await notificationService.syncPacingSchedule(
+      slots: chimes,
+      enabled: profile.mindfulPacingEnabled,
+    );
+  } catch (_) {
+    // Graceful no-op on headless or unsupported environments.
+  }
+
   return PacingScheduleState(
     upcomingChimes: chimes,
     recommendedHourlyMl: hourly,
+    osSchedulingSupported: notificationService.supportsScheduledNotifications,
   );
 });
-

@@ -5,12 +5,20 @@ import '../../core/theme/app_typography.dart';
 import '../providers/hydration_providers.dart';
 
 String formatHour12(int hour24) {
-  final normalized = hour24 % 24;
+  final normalized = ((hour24 % 24) + 24) % 24;
   final suffix = normalized < 12 ? 'AM' : 'PM';
   final hour12 = normalized == 0
       ? 12
       : (normalized > 12 ? normalized - 12 : normalized);
   return '$hour12:00 $suffix';
+}
+
+String formatWeightKg(double weightKg) {
+  final rounded1 = double.parse(weightKg.toStringAsFixed(1));
+  if (rounded1 == rounded1.roundToDouble()) {
+    return '${rounded1.toInt()} kg';
+  }
+  return '${rounded1.toStringAsFixed(1)} kg';
 }
 
 void showProfileCalibrationSheet(BuildContext context, WidgetRef ref) {
@@ -85,7 +93,7 @@ class _ProfileCalibrationSheet extends ConsumerWidget {
                 _buildInfoRow(
                   palette,
                   'Body Weight',
-                  '${profile.weightKg.round()} kg',
+                  formatWeightKg(profile.weightKg),
                 ),
                 _buildInfoRow(
                   palette,

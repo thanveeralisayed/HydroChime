@@ -28,7 +28,8 @@ class AppDatabase {
 
     return await openDatabase(
       path,
-      version: 2,
+      version: 3,
+      singleInstance: !isInMemory,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -81,7 +82,9 @@ class AppDatabase {
         temperature_celsius REAL NOT NULL,
         relative_humidity REAL NOT NULL,
         apparent_temperature_celsius REAL,
-        condition_label TEXT
+        condition_label TEXT,
+        latitude REAL,
+        longitude REAL
       )
     ''');
 
@@ -106,7 +109,7 @@ class AppDatabase {
     int oldVersion,
     int newVersion,
   ) async {
-    if (oldVersion < 2) {
+    if (oldVersion < 2 && newVersion >= 2) {
       await db.execute(
         'ALTER TABLE user_profile ADD COLUMN custom_baseline_ml INTEGER',
       );
@@ -125,6 +128,38 @@ class AppDatabase {
       await db.execute(
         'ALTER TABLE user_profile ADD COLUMN longitude REAL NOT NULL DEFAULT -97.74',
       );
+    }
+    if (oldVersion < 3 && newVersion >= 3) {
+      final tables = await db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='weather_cache'",
+      );
+      if (tables.isEmpty) {
+        await db.execute('''
+          CREATE TABLE weather_cache (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            temperature_celsius REAL NOT NULL,
+            relative_humidity REAL NOT NULL,
+            apparent_temperature_celsius REAL,
+            condition_label TEXT,
+            latitude REAL,
+            longitude REAL
+          )
+        ''');
+      } else {
+        final cols = await db.rawQuery("PRAGMA table_info('weather_cache')");
+        final colNames = cols.map((c) => c['name'] as String).toSet();
+        if (!colNames.contains('latitude')) {
+          await db.execute(
+            'ALTER TABLE weather_cache ADD COLUMN latitude REAL',
+          );
+        }
+        if (!colNames.contains('longitude')) {
+          await db.execute(
+            'ALTER TABLE weather_cache ADD COLUMN longitude REAL',
+          );
+        }
+      }
     }
   }
 

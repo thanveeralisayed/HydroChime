@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_typography.dart';
+import '../../data/services/vault_transfer_service.dart';
 import '../../domain/models/beverage_type.dart';
 import '../providers/analytics_provider.dart';
 import '../providers/hydration_providers.dart';
@@ -17,6 +18,33 @@ class AnalyticsScreen extends ConsumerStatefulWidget {
 
 class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
   int? _selectedBarIndex;
+  bool _isRefreshing = false;
+
+  Future<void> _handleRefresh() async {
+    if (_isRefreshing) return;
+    setState(() => _isRefreshing = true);
+    try {
+      ref.invalidate(hydrationNotifierProvider);
+      await ref.read(hydrationNotifierProvider.future);
+      ref.invalidate(analyticsProvider);
+      await ref.read(analyticsProvider.future);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Analytics refreshed')),
+        );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('Unable to refresh analytics: $e')),
+        );
+    } finally {
+      if (mounted) setState(() => _isRefreshing = false);
+    }
+  }
 
   String _consistencySubtitle(int score, AnalyticsRange range) {
     if (score == 0) {
@@ -105,11 +133,6 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
     final vault = await ref.read(vaultExportServiceProvider.future);
     final csv = await vault.exportToCsv();
     String? savedPath;
-    try {
-      savedPath = await vault.saveCsvToDocuments();
-    } catch (_) {
-      savedPath = null;
-    }
 
     if (!mounted) return;
     final palette = HydroChimeColors.of(context);
@@ -118,73 +141,157 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
     await showDialog<void>(
       context: context,
       builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: palette.surfaceElevated,
-          title: Text(
-            'Export Hydration History',
-            style: AppTypography.headlineMedium(color: palette.textPrimary),
-          ),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (savedPath != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Text(
-                      'Saved CSV to: $savedPath',
-                      style: TextStyle(
-                        color: palette.primaryAtmosphere,
-                        fontSize: 11,
+        return StatefulBuilder(
+          builder: (dialogCtx, setDialogState) {
+            return AlertDialog(
+              backgroundColor: palette.surfaceElevated,
+              title: Text(
+                'Export Hydration History',
+                style: AppTypography.headlineMedium(color: palette.textPrimary),
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (savedPath != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Text(
+                          'Saved CSV to: $savedPath',
+                          style: TextStyle(
+                            color: palette.primaryAtmosphere,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                    Container(
+                      width: double.maxFinite,
+                      constraints: const BoxConstraints(maxHeight: 220),
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: palette.surfaceCard,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: palette.borderSubtle),
+                      ),
+                      child: SingleChildScrollView(
+                        child: SelectableText(
+                          csv.trim(),
+                          style: TextStyle(
+                            color: palette.textSecondary,
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
                       ),
                     ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton.icon(
+                  key: const Key('export_save_csv_button'),
+                  onPressed: () async {
+                    try {
+                      final path = await ref
+                          .read(vaultTransferServiceProvider)
+                          .saveTextWithPicker(
+                            content: csv,
+                            fileName: 'hydrochime_history.csv',
+                            mimeType: 'text/csv',
+                            dialogTitle: 'Save Hydration History CSV',
+                          );
+                      if (!dialogCtx.mounted) return;
+                      if (path != null) {
+                        setDialogState(() => savedPath = path);
+                        messenger.showSnackBar(
+                          SnackBar(content: Text('Saved CSV to $path')),
+                        );
+                      }
+                    } catch (e) {
+                      if (!dialogCtx.mounted) return;
+                      messenger.showSnackBar(
+                        SnackBar(content: Text('Unable to save CSV: $e')),
+                      );
+                    }
+                  },
+                  icon: Icon(
+                    Icons.save_alt,
+                    size: 16,
+                    color: palette.primaryAtmosphere,
                   ),
-                Container(
-                  width: double.maxFinite,
-                  constraints: const BoxConstraints(maxHeight: 220),
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: palette.surfaceCard,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: palette.borderSubtle),
+                  label: Text(
+                    'Save CSV',
+                    style: TextStyle(color: palette.primaryAtmosphere),
                   ),
-                  child: SingleChildScrollView(
-                    child: SelectableText(
-                      csv.trim(),
-                      style: TextStyle(
-                        color: palette.textSecondary,
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      ),
+                ),
+                Builder(
+                  builder: (shareCtx) => TextButton.icon(
+                    key: const Key('export_share_csv_button'),
+                    onPressed: () async {
+                      try {
+                        final box = shareCtx.findRenderObject() as RenderBox?;
+                        final shareOrigin =
+                            (box != null && box.hasSize && !box.size.isEmpty)
+                                ? (box.localToGlobal(Offset.zero) & box.size)
+                                : null;
+                        await ref
+                            .read(vaultTransferServiceProvider)
+                            .shareTextAsFile(
+                              content: csv,
+                              fileName: 'hydrochime_history.csv',
+                              mimeType: 'text/csv',
+                              subject: 'HydroChime Hydration History',
+                              sharePositionOrigin: shareOrigin,
+                            );
+                      } on VaultTransferUnsupportedException catch (e) {
+                        if (!dialogCtx.mounted) return;
+                        messenger.showSnackBar(
+                          SnackBar(content: Text(e.message)),
+                        );
+                      } catch (e) {
+                        if (!dialogCtx.mounted) return;
+                        messenger.showSnackBar(
+                          SnackBar(content: Text('Unable to share CSV: $e')),
+                        );
+                      }
+                    },
+                    icon: Icon(
+                      Icons.ios_share,
+                      size: 16,
+                      color: palette.primaryAtmosphere,
+                    ),
+                    label: Text(
+                      'Share',
+                      style: TextStyle(color: palette.primaryAtmosphere),
                     ),
                   ),
                 ),
+                TextButton(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: csv));
+                    if (!dialogCtx.mounted) return;
+                    messenger.showSnackBar(
+                      const SnackBar(
+                        content: Text('CSV history copied to clipboard'),
+                      ),
+                    );
+                  },
+                  child: Text(
+                    'Copy CSV',
+                    style: TextStyle(color: palette.primaryAtmosphere),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogCtx),
+                  child: Text(
+                    'Close',
+                    style: TextStyle(color: palette.textSecondary),
+                  ),
+                ),
               ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: csv));
-                if (!ctx.mounted) return;
-                messenger.showSnackBar(
-                  const SnackBar(content: Text('CSV history copied to clipboard')),
-                );
-              },
-              child: Text(
-                'Copy CSV',
-                style: TextStyle(color: palette.primaryAtmosphere),
-              ),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: Text(
-                'Close',
-                style: TextStyle(color: palette.textSecondary),
-              ),
-            ),
-          ],
+            );
+          },
         );
       },
     );
@@ -205,88 +312,108 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
     return Scaffold(
       backgroundColor: palette.canvas,
       body: SafeArea(
-        child: analyticsAsync.when(
-          data: (data) {
-            final maxBarVol = data.bars.fold<int>(
-              hydrationState?.targetVolumeMl ?? 1000,
-              (maxVal, bar) => math.max(maxVal, bar.volumeMl),
-            );
-            final selectedBar = (_selectedBarIndex != null &&
-                    _selectedBarIndex! < data.bars.length)
-                ? data.bars[_selectedBarIndex!]
-                : null;
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 16, 24, 12),
+              child: Column(
+                children: [
+                  // Header
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      IconButton(
+                        key: const Key('analytics_tune_button'),
+                        tooltip: 'Calibration & goal details',
+                        icon: Icon(
+                          Icons.tune,
+                          color: palette.textSecondary,
+                          size: 20,
+                        ),
+                        onPressed: () => _openAnalyticsTuneSheet(hydrationState),
+                      ),
+                      Flexible(
+                        child: Text(
+                          'ANALYTICS',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTypography.labelMicro(
+                            color: palette.textSecondary,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        key: const Key('analytics_refresh_button'),
+                        tooltip: 'Refresh analytics',
+                        icon: _isRefreshing
+                            ? SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.8,
+                                  color: palette.primaryAtmosphere,
+                                ),
+                              )
+                            : Icon(
+                                Icons.refresh,
+                                color: palette.textSecondary,
+                                size: 20,
+                              ),
+                        onPressed: _isRefreshing ? null : _handleRefresh,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  // Time Filter Pills
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: _buildFilterPill(
+                          title: 'Day',
+                          range: AnalyticsRange.day,
+                          selectedRange: selectedRange,
+                          palette: palette,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: _buildFilterPill(
+                          title: 'Week',
+                          range: AnalyticsRange.week,
+                          selectedRange: selectedRange,
+                          palette: palette,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: _buildFilterPill(
+                          title: 'Month',
+                          range: AnalyticsRange.month,
+                          selectedRange: selectedRange,
+                          palette: palette,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: analyticsAsync.when(
+                data: (data) {
+                  final maxBarVol = data.bars.fold<int>(
+                    hydrationState?.targetVolumeMl ?? 1000,
+                    (maxVal, bar) => math.max(maxVal, bar.volumeMl),
+                  );
+                  final selectedBar = (_selectedBarIndex != null &&
+                          _selectedBarIndex! < data.bars.length)
+                      ? data.bars[_selectedBarIndex!]
+                      : null;
 
-            return ListView(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              children: [
-                // Header
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    IconButton(
-                      key: const Key('analytics_tune_button'),
-                      tooltip: 'Calibration & goal details',
-                      icon: Icon(
-                        Icons.tune,
-                        color: palette.textSecondary,
-                        size: 20,
-                      ),
-                      onPressed: () => _openAnalyticsTuneSheet(hydrationState),
-                    ),
-                    Text(
-                      'ANALYTICS',
-                      style: AppTypography.labelMicro(
-                        color: palette.textSecondary,
-                      ),
-                    ),
-                    IconButton(
-                      key: const Key('analytics_refresh_button'),
-                      tooltip: 'Refresh analytics',
-                      icon: Icon(
-                        Icons.refresh,
-                        color: palette.textSecondary,
-                        size: 20,
-                      ),
-                      onPressed: () {
-                        ref.invalidate(hydrationNotifierProvider);
-                        ref.invalidate(analyticsProvider);
-                        ScaffoldMessenger.of(context)
-                          ..hideCurrentSnackBar()
-                          ..showSnackBar(
-                            const SnackBar(content: Text('Analytics refreshed')),
-                          );
-                      },
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                // Time Filter Pills
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _buildFilterPill(
-                      title: 'Day',
-                      range: AnalyticsRange.day,
-                      selectedRange: selectedRange,
-                      palette: palette,
-                    ),
-                    const SizedBox(width: 8),
-                    _buildFilterPill(
-                      title: 'Week',
-                      range: AnalyticsRange.week,
-                      selectedRange: selectedRange,
-                      palette: palette,
-                    ),
-                    const SizedBox(width: 8),
-                    _buildFilterPill(
-                      title: 'Month',
-                      range: AnalyticsRange.month,
-                      selectedRange: selectedRange,
-                      palette: palette,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 28),
+                  return ListView(
+                    padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
+                    children: [
                 // Consistency Arc Hero
                 Center(
                   child: SizedBox(
@@ -479,20 +606,37 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
                         ),
                       ],
                     ),
-                    Text(
-                      data.range == AnalyticsRange.day
-                          ? (data.targetsMetCount > 0
-                              ? 'Daily Target Met'
-                              : 'Pacing In Progress')
-                          : 'Target Met ${data.targetsMetCount} of ${data.totalPeriodDays} days',
-                      style: TextStyle(
-                        color: palette.primaryAtmosphere,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        data.range == AnalyticsRange.day
+                            ? (data.targetsMetCount > 0
+                                ? 'Daily Target Met'
+                                : 'Pacing In Progress')
+                            : 'Target Met ${data.targetsMetCount} of ${data.totalPeriodDays} days',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.end,
+                        style: TextStyle(
+                          color: palette.primaryAtmosphere,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
                   ],
                 ),
+                if (data.range == AnalyticsRange.day &&
+                    data.outsideWindowMl > 0) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Includes ${data.outsideWindowMl} ml logged outside active window',
+                    style: TextStyle(
+                      color: palette.textTertiary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 32),
                 // Beverage Distribution Section
                 Text(
@@ -541,11 +685,30 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
             child: CircularProgressIndicator(color: palette.primaryVital),
           ),
           error: (err, _) => Center(
-            child: Text(
-              'Error loading analytics: $err',
-              style: const TextStyle(color: Colors.red),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Error loading analytics: $err',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.redAccent),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    key: const Key('analytics_retry_button'),
+                    onPressed: _isRefreshing ? null : _handleRefresh,
+                    icon: const Icon(Icons.refresh, size: 16),
+                    label: const Text('Retry'),
+                  ),
+                ],
+              ),
             ),
           ),
+        ),
+            ),
+          ],
         ),
       ),
     );
@@ -564,7 +727,7 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
         ref.read(analyticsRangeProvider.notifier).setRange(range);
       },
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         decoration: BoxDecoration(
           color: isSelected
               ? palette.primaryAtmosphere.withOpacity(0.14)
@@ -576,12 +739,17 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
                 : palette.borderSubtle,
           ),
         ),
-        child: Text(
-          title,
-          style: TextStyle(
-            color: isSelected ? palette.primaryAtmosphere : palette.textSecondary,
-            fontSize: 12,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            title,
+            maxLines: 1,
+            style: TextStyle(
+              color:
+                  isSelected ? palette.primaryAtmosphere : palette.textSecondary,
+              fontSize: 12,
+              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+            ),
           ),
         ),
       ),
@@ -597,26 +765,33 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Row(
-          children: [
-            Container(
-              width: 7,
-              height: 7,
-              decoration: BoxDecoration(
-                color: color,
-                shape: BoxShape.circle,
+        Expanded(
+          child: Row(
+            children: [
+              Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                ),
               ),
-            ),
-            const SizedBox(width: 10),
-            Text(
-              label,
-              style: TextStyle(
-                color: palette.textPrimary,
-                fontSize: 13,
+              const SizedBox(width: 10),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: palette.textPrimary,
+                    fontSize: 13,
+                  ),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
+        const SizedBox(width: 8),
         Text(
           percent,
           style: TextStyle(

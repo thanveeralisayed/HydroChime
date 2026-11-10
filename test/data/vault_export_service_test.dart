@@ -51,10 +51,11 @@ void main() {
       final jsonStr = await vaultService.exportToJson();
       final decoded = jsonDecode(jsonStr) as Map<String, dynamic>;
 
-      expect(decoded['version'], 1);
+      expect(decoded['version'], 2);
       expect(decoded['app'], 'HydroChime');
       expect((decoded['profile'] as Map<String, dynamic>)['weight_kg'], 78.0);
       expect((decoded['logs'] as List).length, 2);
+      expect(decoded['daily_summaries'], isA<List>());
     });
 
     test('exports intake logs to valid CSV with header row', () async {
@@ -112,6 +113,33 @@ void main() {
         () => vaultService.restoreFromJson('not json'),
         throwsA(isA<FormatException>()),
       );
+    });
+
+    test('exports and restores daily_summaries and preserves v1 backwards compatibility', () async {
+      await intakeRepo.upsertDailySummary(
+        date: DateTime(2026, 11, 8),
+        baselineGoalMl: 2450,
+        adjustedGoalMl: 3400,
+        totalIngestedMl: 3100,
+        weatherTemp: 33.0,
+        weatherHumidity: 35.0,
+        consistencyScore: 88,
+      );
+      final backupV2 = await vaultService.exportToJson();
+      await db.delete('daily_summaries');
+      expect(await intakeRepo.getDailySummary(DateTime(2026, 11, 8)), isNull);
+
+      await vaultService.restoreFromJson(backupV2);
+      final restoredSummary = await intakeRepo.getDailySummary(DateTime(2026, 11, 8));
+      expect(restoredSummary, isNotNull);
+      expect(restoredSummary!['adjusted_goal_ml'], 3400);
+
+      // Legacy v1 JSON without daily_summaries should still restore cleanly
+      final decoded = jsonDecode(backupV2) as Map<String, dynamic>;
+      decoded.remove('daily_summaries');
+      decoded['version'] = 1;
+      await vaultService.restoreFromJson(jsonEncode(decoded));
+      expect(await profileRepo.getUserProfile(), isNotNull);
     });
   });
 }

@@ -3,30 +3,24 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_typography.dart';
+import '../../data/repositories/weather_repository.dart';
 import '../../domain/models/climate_condition.dart';
 import '../../domain/services/notification_scheduler.dart';
 import '../providers/hydration_providers.dart';
+import '../widgets/location_picker_section.dart';
 import '../widgets/profile_calibration_sheet.dart';
 
-class _CityPreset {
-  final String name;
-  final double latitude;
-  final double longitude;
+class ClimateHydrationScreen extends ConsumerStatefulWidget {
+  const ClimateHydrationScreen({super.key});
 
-  const _CityPreset(this.name, this.latitude, this.longitude);
+  @override
+  ConsumerState<ClimateHydrationScreen> createState() =>
+      _ClimateHydrationScreenState();
 }
 
-const List<_CityPreset> _cityPresets = [
-  _CityPreset('Austin', 30.27, -97.74),
-  _CityPreset('Seattle', 47.61, -122.33),
-  _CityPreset('Phoenix', 33.45, -112.07),
-  _CityPreset('New York', 40.71, -74.01),
-  _CityPreset('London', 51.51, -0.13),
-  _CityPreset('Tokyo', 35.68, 139.77),
-];
-
-class ClimateHydrationScreen extends ConsumerWidget {
-  const ClimateHydrationScreen({super.key});
+class _ClimateHydrationScreenState
+    extends ConsumerState<ClimateHydrationScreen> {
+  bool _isSyncing = false;
 
   String _advisoryBadge(ClimateCondition climate) {
     if (climate.temperatureCelsius >= 30 ||
@@ -60,8 +54,32 @@ class ClimateHydrationScreen extends ConsumerWidget {
     );
   }
 
+  Future<void> _handleSyncWeather(String cityName) async {
+    if (_isSyncing) return;
+    setState(() => _isSyncing = true);
+    try {
+      final result = await ref
+          .read(weatherSyncProvider.notifier)
+          .refreshWeather(forceRefresh: true);
+      if (!mounted || result == null) return;
+      final message = switch (result.source) {
+        WeatherDataSource.liveApi =>
+          'Synced ${result.condition.temperatureCelsius.round()}°C weather for $cityName',
+        WeatherDataSource.localCache =>
+          'Offline — showing cached weather for $cityName',
+        WeatherDataSource.offlineFallback =>
+          'Offline — using temperate ${result.condition.temperatureCelsius.round()}°C fallback',
+      };
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(message)));
+    } finally {
+      if (mounted) setState(() => _isSyncing = false);
+    }
+  }
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final palette = HydroChimeColors.of(context);
     final climate = ref.watch(currentClimateProvider);
     final hydrationAsync = ref.watch(hydrationNotifierProvider);
@@ -106,6 +124,12 @@ class ClimateHydrationScreen extends ConsumerWidget {
     final barFactor =
         hydrationState != null ? hydrationState.percentage.clamp(0.05, 1.0) : 0.05;
 
+    final heatSpikePrev = weatherSync?.previousCondition ??
+        const ClimateCondition(
+          temperatureCelsius: 25,
+          relativeHumidity: 50,
+        );
+
     return Scaffold(
       backgroundColor: palette.canvas,
       body: SafeArea(
@@ -116,31 +140,38 @@ class ClimateHydrationScreen extends ConsumerWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: palette.primaryAtmosphere,
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: palette.primaryAtmosphere,
-                            blurRadius: 8,
+                Expanded(
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: palette.primaryAtmosphere,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: palette.primaryAtmosphere,
+                              blurRadius: 8,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '$cityName • ${climate.temperatureCelsius.round()}°C',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTypography.labelMicro(
+                            color: palette.textSecondary,
                           ),
-                        ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '$cityName • ${climate.temperatureCelsius.round()}°C',
-                      style: AppTypography.labelMicro(
-                        color: palette.textSecondary,
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
+                const SizedBox(width: 8),
                 Row(
                   children: [
                     IconButton(
@@ -194,27 +225,30 @@ class ClimateHydrationScreen extends ConsumerWidget {
                     color: palette.primaryVital.withOpacity(0.25),
                   ),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      climate.temperatureCelsius >= 22
-                          ? Icons.wb_sunny_outlined
-                          : Icons.ac_unit_outlined,
-                      color: palette.primaryAtmosphere,
-                      size: 14,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      _advisoryBadge(climate),
-                      style: TextStyle(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        climate.temperatureCelsius >= 22
+                            ? Icons.wb_sunny_outlined
+                            : Icons.ac_unit_outlined,
                         color: palette.primaryAtmosphere,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 1.2,
+                        size: 14,
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 6),
+                      Text(
+                        _advisoryBadge(climate),
+                        style: TextStyle(
+                          color: palette.primaryAtmosphere,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -223,10 +257,7 @@ class ClimateHydrationScreen extends ConsumerWidget {
               Center(
                 child: Text(
                   const NotificationScheduler().buildHeatSpikeAlertMessage(
-                        previous: const ClimateCondition(
-                          temperatureCelsius: 25,
-                          relativeHumidity: 50,
-                        ),
+                        previous: heatSpikePrev,
                         current: climate,
                         cityName: cityName,
                       ) ??
@@ -301,46 +332,49 @@ class ClimateHydrationScreen extends ConsumerWidget {
                   borderRadius: BorderRadius.circular(9999),
                   border: Border.all(color: palette.borderSubtle),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.water_drop_outlined,
-                      color: palette.primaryAtmosphere,
-                      size: 14,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      '${climate.relativeHumidity.round()}% Humidity',
-                      style: TextStyle(
-                        color: palette.textSecondary,
-                        fontSize: 12,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.water_drop_outlined,
+                        color: palette.primaryAtmosphere,
+                        size: 14,
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Container(
-                      width: 4,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: palette.borderSubtle,
-                        shape: BoxShape.circle,
+                      const SizedBox(width: 6),
+                      Text(
+                        '${climate.relativeHumidity.round()}% Humidity',
+                        style: TextStyle(
+                          color: palette.textSecondary,
+                          fontSize: 12,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Icon(
-                      Icons.air,
-                      color: palette.primaryAtmosphere,
-                      size: 14,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Apparent ${(climate.apparentTemperatureCelsius ?? climate.temperatureCelsius).toStringAsFixed(1)}°C',
-                      style: TextStyle(
-                        color: palette.textSecondary,
-                        fontSize: 12,
+                      const SizedBox(width: 12),
+                      Container(
+                        width: 4,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: palette.borderSubtle,
+                          shape: BoxShape.circle,
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 12),
+                      Icon(
+                        Icons.air,
+                        color: palette.primaryAtmosphere,
+                        size: 14,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Apparent ${(climate.apparentTemperatureCelsius ?? climate.temperatureCelsius).toStringAsFixed(1)}°C',
+                        style: TextStyle(
+                          color: palette.textSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -406,23 +440,30 @@ class ClimateHydrationScreen extends ConsumerWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Row(
-                      children: [
-                        Icon(
-                          Icons.schedule,
-                          color: palette.primaryAtmosphere,
-                          size: 14,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          'Pacing: ~$pacingHourly mL / hr',
-                          style: TextStyle(
-                            color: palette.textSecondary,
-                            fontSize: 12,
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.schedule,
+                            color: palette.primaryAtmosphere,
+                            size: 14,
                           ),
-                        ),
-                      ],
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'Pacing: ~$pacingHourly mL / hr',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: palette.textSecondary,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
+                    const SizedBox(width: 8),
                     Text(
                       '$goalPercent% Optimal',
                       style: TextStyle(
@@ -530,23 +571,36 @@ class ClimateHydrationScreen extends ConsumerWidget {
             const SizedBox(height: 24),
             // Privacy Lock & Refresh Footnote
             GestureDetector(
-              onTap: () => ref
-                  .read(weatherSyncProvider.notifier)
-                  .refreshWeather(forceRefresh: true),
+              key: const Key('climate_sync_button'),
+              onTap: () => _handleSyncWeather(cityName),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(
-                    Icons.lock_outline,
-                    color: palette.primaryAtmosphere.withOpacity(0.8),
-                    size: 13,
-                  ),
+                  if (_isSyncing)
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.8,
+                        color: palette.primaryAtmosphere,
+                      ),
+                    )
+                  else
+                    Icon(
+                      Icons.lock_outline,
+                      color: palette.primaryAtmosphere.withOpacity(0.8),
+                      size: 13,
+                    ),
                   const SizedBox(width: 6),
-                  Text(
-                    '$updatedText • Tap to sync',
-                    style: TextStyle(
-                      color: palette.textSecondary,
-                      fontSize: 11,
+                  Flexible(
+                    child: Text(
+                      _isSyncing ? 'Syncing weather...' : '$updatedText • Tap to sync',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: palette.textSecondary,
+                        fontSize: 11,
+                      ),
                     ),
                   ),
                 ],
@@ -570,9 +624,34 @@ class _ClimateTuneSheet extends ConsumerStatefulWidget {
 }
 
 class _ClimateTuneSheetState extends ConsumerState<_ClimateTuneSheet> {
-  late int _activityMinutes;
-  late _CityPreset _selectedCity;
-  bool _initialized = false;
+  final TextEditingController _customActivityController =
+      TextEditingController(text: '0');
+  int _activityMinutes = 0;
+  LocationSelection _selectedCity = kDefaultCityPresets.first;
+  bool _hydratedActivityFromProfile = false;
+  bool _hydratedCityFromProfile = false;
+  bool _userEditedActivity = false;
+  bool _userEditedCity = false;
+  bool _isSaving = false;
+  String? _activityError;
+
+  @override
+  void dispose() {
+    _customActivityController.dispose();
+    super.dispose();
+  }
+
+  void _setActivityMinutes(int minutes, {bool fromUser = true}) {
+    setState(() {
+      if (fromUser) _userEditedActivity = true;
+      _activityMinutes = minutes;
+      _activityError = null;
+      final str = minutes.toString();
+      if (_customActivityController.text != str) {
+        _customActivityController.text = str;
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -584,132 +663,223 @@ class _ClimateTuneSheetState extends ConsumerState<_ClimateTuneSheet> {
       _ => null,
     };
 
-    if (!_initialized && profile != null) {
-      _activityMinutes = profile.dailyActivityMinutes;
-      final currentCityName = profile.cityName;
-      _selectedCity = _cityPresets.firstWhere(
-        (c) => c.name == currentCityName,
-        orElse: () => _CityPreset(
-          currentCityName,
-          profile.latitude,
-          profile.longitude,
-        ),
-      );
-      _initialized = true;
-    } else if (!_initialized) {
-      _activityMinutes = 0;
-      _selectedCity = _cityPresets.first;
+    if (profile != null) {
+      if (!_hydratedActivityFromProfile && !_userEditedActivity) {
+        _activityMinutes = profile.dailyActivityMinutes;
+        _customActivityController.text = profile.dailyActivityMinutes.toString();
+        _hydratedActivityFromProfile = true;
+      }
+      if (!_hydratedCityFromProfile && !_userEditedCity) {
+        _selectedCity = kDefaultCityPresets.firstWhere(
+          (c) => c.name == profile.cityName,
+          orElse: () => LocationSelection(
+            profile.cityName,
+            profile.latitude,
+            profile.longitude,
+          ),
+        );
+        _hydratedCityFromProfile = true;
+      }
     }
 
-    return Container(
-      decoration: BoxDecoration(
-        color: palette.surfaceElevated,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        border: Border.all(color: palette.borderSubtle),
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
       ),
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Climate & Exertion Calibration',
-              style: AppTypography.headlineMedium(color: palette.textPrimary),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Daily Workout / Exertion Duration (+12 ml / min)',
-              style: TextStyle(color: palette.textSecondary, fontSize: 12),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [0, 20, 35, 60, 90].map((mins) {
-                final isSelected = _activityMinutes == mins;
-                return ChoiceChip(
-                  label: Text(
-                    '$mins min',
-                    style: TextStyle(
-                      color: isSelected
-                          ? (palette.isDark ? Colors.black : Colors.white)
-                          : palette.textPrimary,
-                      fontSize: 12,
+      child: Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.85,
+        ),
+        decoration: BoxDecoration(
+          color: palette.surfaceElevated,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border.all(color: palette.borderSubtle),
+        ),
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+        child: SafeArea(
+          top: false,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Climate & Exertion Calibration',
+                  style: AppTypography.headlineMedium(color: palette.textPrimary),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Daily Workout / Exertion Duration (+12 ml / min)',
+                  style: TextStyle(color: palette.textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [0, 20, 35, 60, 90].map((mins) {
+                    final isSelected = _activityMinutes == mins;
+                    return ChoiceChip(
+                      label: Text(
+                        '$mins min',
+                        style: TextStyle(
+                          color: isSelected
+                              ? (palette.isDark ? Colors.black : Colors.white)
+                              : palette.textPrimary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      selected: isSelected,
+                      selectedColor: palette.primaryVital,
+                      backgroundColor: palette.surfaceCard,
+                      side: BorderSide(color: palette.borderSubtle),
+                      onSelected: (_) => _setActivityMinutes(mins),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  key: const Key('custom_activity_input'),
+                  controller: _customActivityController,
+                  keyboardType: TextInputType.number,
+                  style: TextStyle(color: palette.textPrimary, fontSize: 13),
+                  onChanged: (val) {
+                    setState(() {
+                      _userEditedActivity = true;
+                      _activityError = null;
+                      final parsed = int.tryParse(val.trim());
+                      if (parsed != null && parsed >= 0 && parsed <= 300) {
+                        _activityMinutes = parsed;
+                      }
+                    });
+                  },
+                  decoration: InputDecoration(
+                    isDense: true,
+                    labelText: 'Custom exertion minutes (0–300)',
+                    errorText: _activityError,
+                    labelStyle:
+                        TextStyle(color: palette.textSecondary, fontSize: 12),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
                     ),
-                  ),
-                  selected: isSelected,
-                  selectedColor: palette.primaryVital,
-                  backgroundColor: palette.surfaceCard,
-                  side: BorderSide(color: palette.borderSubtle),
-                  onSelected: (_) => setState(() => _activityMinutes = mins),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 18),
-            Text(
-              'Hyper-Local Weather Region (0.01° quantized)',
-              style: TextStyle(color: palette.textSecondary, fontSize: 12),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: _cityPresets.map((city) {
-                final isSelected = _selectedCity.name == city.name;
-                return ChoiceChip(
-                  label: Text(
-                    city.name,
-                    style: TextStyle(
-                      color: isSelected
-                          ? (palette.isDark ? Colors.black : Colors.white)
-                          : palette.textPrimary,
-                      fontSize: 12,
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(color: palette.borderSubtle),
                     ),
-                  ),
-                  selected: isSelected,
-                  selectedColor: palette.primaryVital,
-                  backgroundColor: palette.surfaceCard,
-                  side: BorderSide(color: palette.borderSubtle),
-                  onSelected: (_) => setState(() => _selectedCity = city),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 22),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: palette.primaryVital,
-                  foregroundColor: palette.isDark ? Colors.black : Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(color: palette.primaryVital),
+                    ),
                   ),
                 ),
-                onPressed: () async {
-                  final repo = await widget.rootRef
-                      .read(userProfileRepositoryProvider.future);
-                  await repo.updateDailyActivityMinutes(_activityMinutes);
-                  await repo.updateLocation(
-                    _selectedCity.name,
-                    _selectedCity.latitude,
-                    _selectedCity.longitude,
-                  );
-                  widget.rootRef.invalidate(userProfileProvider);
-                  widget.rootRef.invalidate(hydrationNotifierProvider);
-                  await widget.rootRef
-                      .read(weatherSyncProvider.notifier)
-                      .refreshWeather(forceRefresh: true);
-                  if (context.mounted) {
-                    Navigator.pop(context);
-                  }
-                },
-                child: const Text('Apply Calibration'),
-              ),
+                const SizedBox(height: 18),
+                Text(
+                  'Hyper-Local Weather Region (0.01° quantized)',
+                  style: TextStyle(color: palette.textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                LocationPickerSection(
+                  selected: _selectedCity,
+                  rootRef: widget.rootRef,
+                  onSelected: (loc) {
+                    setState(() {
+                      _userEditedCity = true;
+                      _selectedCity = loc;
+                    });
+                  },
+                ),
+                const SizedBox(height: 22),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: palette.primaryVital,
+                      foregroundColor:
+                          palette.isDark ? Colors.black : Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    onPressed: _isSaving
+                        ? null
+                        : () async {
+                            final parsed = int.tryParse(
+                              _customActivityController.text.trim(),
+                            );
+                            if (parsed == null || parsed < 0 || parsed > 300) {
+                              setState(
+                                () => _activityError = 'Enter 0 to 300 minutes',
+                              );
+                              return;
+                            }
+                            setState(() {
+                              _isSaving = true;
+                              _activityError = null;
+                            });
+                            try {
+                              final oldProfile = await widget.rootRef
+                                  .read(userProfileProvider.future);
+                              final locationChanged =
+                                  (oldProfile.latitude - _selectedCity.latitude)
+                                          .abs() >
+                                      0.001 ||
+                                  (oldProfile.longitude - _selectedCity.longitude)
+                                          .abs() >
+                                      0.001 ||
+                                  oldProfile.cityName != _selectedCity.name;
+
+                              final repo = await widget.rootRef
+                                  .read(userProfileRepositoryProvider.future);
+                              await repo.updateDailyActivityMinutes(parsed);
+                              await repo.updateLocation(
+                                _selectedCity.name,
+                                _selectedCity.latitude,
+                                _selectedCity.longitude,
+                              );
+                              widget.rootRef.invalidate(userProfileProvider);
+                              await widget.rootRef
+                                  .read(userProfileProvider.future);
+                              if (locationChanged) {
+                                await widget.rootRef
+                                    .read(weatherSyncProvider.future);
+                              }
+                              widget.rootRef
+                                  .invalidate(hydrationNotifierProvider);
+                              await widget.rootRef
+                                  .read(hydrationNotifierProvider.future);
+                              if (context.mounted) {
+                                Navigator.pop(context);
+                              }
+                            } catch (e) {
+                              if (mounted) {
+                                setState(
+                                  () => _activityError =
+                                      'Unable to apply calibration: $e',
+                                );
+                              }
+                            } finally {
+                              if (mounted) {
+                                setState(() => _isSaving = false);
+                              }
+                            }
+                          },
+                    child: _isSaving
+                        ? SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color:
+                                  palette.isDark ? Colors.black : Colors.white,
+                            ),
+                          )
+                        : const Text('Apply Calibration'),
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );

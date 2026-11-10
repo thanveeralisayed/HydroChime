@@ -11,6 +11,19 @@ class IntakeLogRepository {
     return await _db.insert('intake_logs', log.toMap());
   }
 
+  Future<int> updateLog(IntakeLog log) async {
+    if (log.id == null) {
+      throw ArgumentError('Cannot update IntakeLog without an existing id');
+    }
+    final data = log.toMap()..remove('id');
+    return await _db.update(
+      'intake_logs',
+      data,
+      where: 'id = ?',
+      whereArgs: [log.id],
+    );
+  }
+
   Future<int> deleteLog(int id) async {
     return await _db.delete(
       'intake_logs',
@@ -107,28 +120,55 @@ class IntakeLogRepository {
     required DateTime date,
     required int startHour,
     required int endHour,
+    bool resolveActiveShift = false,
   }) async {
-    final startOfDay = DateTime(date.year, date.month, date.day).toIso8601String();
-    final endOfDay = DateTime(date.year, date.month, date.day, 23, 59, 59, 999)
-        .toIso8601String();
+    if (startHour == endHour) return [];
+    final isOvernight = endHour < startHour;
+    final hoursCount = isOvernight
+        ? (24 - startHour + endHour)
+        : (endHour - startHour);
+    final distribution = List.filled(hoursCount, 0);
+
+    if (!isOvernight) {
+      final startOfDay =
+          DateTime(date.year, date.month, date.day).toIso8601String();
+      final endOfDay =
+          DateTime(date.year, date.month, date.day, 23, 59, 59, 999)
+              .toIso8601String();
+
+      final logs = await _db.query(
+        'intake_logs',
+        where: 'timestamp >= ? AND timestamp <= ?',
+        whereArgs: [startOfDay, endOfDay],
+      );
+
+      for (final map in logs) {
+        final log = IntakeLog.fromMap(map);
+        final hour = log.timestamp.hour;
+        if (hour >= startHour && hour < endHour) {
+          distribution[hour - startHour] += log.effectiveVolumeMl;
+        }
+      }
+      return distribution;
+    }
+
+    final day = DateTime(date.year, date.month, date.day);
+    final offsetDays =
+        (resolveActiveShift && date.hour < startHour) ? -1 : 0;
+    final shiftStart = day.add(Duration(days: offsetDays, hours: startHour));
+    final shiftEnd = shiftStart.add(Duration(hours: hoursCount));
 
     final logs = await _db.query(
       'intake_logs',
-      where: 'timestamp >= ? AND timestamp <= ?',
-      whereArgs: [startOfDay, endOfDay],
+      where: 'timestamp >= ? AND timestamp < ?',
+      whereArgs: [shiftStart.toIso8601String(), shiftEnd.toIso8601String()],
     );
-
-    final hoursCount = endHour - startHour;
-    if (hoursCount <= 0) return [];
-
-    final distribution = List.filled(hoursCount, 0);
 
     for (final map in logs) {
       final log = IntakeLog.fromMap(map);
-      final hour = log.timestamp.hour;
-      if (hour >= startHour && hour < endHour) {
-        final index = hour - startHour;
-        distribution[index] += log.volumeMl;
+      final bucketIndex = log.timestamp.difference(shiftStart).inHours;
+      if (bucketIndex >= 0 && bucketIndex < hoursCount) {
+        distribution[bucketIndex] += log.effectiveVolumeMl;
       }
     }
 

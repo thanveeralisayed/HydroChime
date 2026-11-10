@@ -149,6 +149,102 @@ void main() {
       expect(monthAnalytics.totalPeriodDays, 30);
       expect(monthAnalytics.bars.length, 30);
     });
+
+    test('uses effectiveVolumeMl in Day bars and supports overnight window', () async {
+      final now = DateTime.now();
+      await intakeRepo.insertLog(IntakeLog(
+        timestamp: DateTime(now.year, now.month, now.day, 10, 0),
+        volumeMl: 1000,
+        beverageType: BeverageType.electrolytes,
+        effectiveVolumeMl: 1450,
+      ));
+
+      container.read(analyticsRangeProvider.notifier).setRange(AnalyticsRange.day);
+      container.invalidate(hydrationNotifierProvider);
+
+      final dayAnalytics = await container.read(analyticsProvider.future);
+      // 10 AM is index 3 in 7..22 window
+      expect(dayAnalytics.bars[3].volumeMl, 1450);
+      expect(dayAnalytics.periodTotalMl, 1450);
+
+      // Overnight shift schedule 20:00 -> 08:00 should produce 12 bars
+      // and classify 10:00 AM log as outsideWindowMl
+      await profileRepo.updateActiveWindow(20, 8);
+      container.invalidate(userProfileProvider);
+      container.invalidate(hydrationNotifierProvider);
+
+      final overnight = await container.read(analyticsProvider.future);
+      expect(overnight.bars.length, 12);
+      expect(overnight.outsideWindowMl, 1450);
+    });
+
+    test('uses per-day adjusted_goal_ml from daily_summaries when computing historical targetsMet',
+        () async {
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day, 10, 0);
+      final yesterday = today.subtract(const Duration(days: 1));
+
+      // Yesterday had a heat-wave target of 3600 ml saved in daily_summaries;
+      // logging 3000 ml should NOT count as meeting yesterday's target even if today is 2450 ml.
+      await intakeRepo.upsertDailySummary(
+        date: yesterday,
+        baselineGoalMl: 2450,
+        adjustedGoalMl: 3600,
+        totalIngestedMl: 3000,
+        consistencyScore: 80,
+      );
+      await intakeRepo.insertLog(IntakeLog(
+        timestamp: yesterday,
+        volumeMl: 3000,
+        beverageType: BeverageType.water,
+        effectiveVolumeMl: 3000,
+      ));
+
+      container.invalidate(hydrationNotifierProvider);
+      final analytics = await container.read(analyticsProvider.future);
+      expect(analytics.targetsMetCount, 0);
+    });
+
+    test('overnight active window includes prior evening intake in Day bars & consistency without polluting rawByBeverage',
+        () async {
+      final now = DateTime.now();
+      final todayMidnight = DateTime(now.year, now.month, now.day);
+      final yesterdayEvening =
+          todayMidnight.subtract(const Duration(hours: 2)); // yesterday 22:00
+      final earlyToday = todayMidnight.add(const Duration(hours: 2)); // today 02:00
+
+      await profileRepo.updateActiveWindow(20, 8);
+      await intakeRepo.insertLog(IntakeLog(
+        timestamp: yesterdayEvening,
+        volumeMl: 500,
+        beverageType: BeverageType.coffee,
+        effectiveVolumeMl: 400,
+      ));
+      await intakeRepo.insertLog(IntakeLog(
+        timestamp: earlyToday,
+        volumeMl: 400,
+        beverageType: BeverageType.water,
+        effectiveVolumeMl: 400,
+      ));
+
+      container.read(analyticsRangeProvider.notifier).setRange(AnalyticsRange.day);
+      container.invalidate(userProfileProvider);
+      container.invalidate(hydrationNotifierProvider);
+
+      final overnightDay = await container.read(analyticsProvider.future);
+      expect(overnightDay.bars.length, 12);
+      // 22:00 yesterday is index 2 in 20:00->08:00 shift; 02:00 today is index 6
+      expect(overnightDay.bars[2].volumeMl, 400);
+      expect(overnightDay.bars[6].volumeMl, 400);
+      expect(overnightDay.outsideWindowMl, 0);
+      // Today's Beverage Distribution in Day view only includes today's calendar logs (water, not yesterday's coffee)
+      final coffeeStat = overnightDay.beverageStats
+          .firstWhere((s) => s.type == BeverageType.coffee);
+      final waterStat = overnightDay.beverageStats
+          .firstWhere((s) => s.type == BeverageType.water);
+      expect(coffeeStat.percentage, 0);
+      expect(waterStat.percentage, 100);
+    });
   });
 }
 

@@ -50,10 +50,12 @@ class WeatherRepository {
     required double longitude,
     bool forceRefresh = false,
   }) async {
-    // 1. Check local cache unless forced
+    final coord = _apiClient.anonymizeCoordinates(latitude, longitude);
+
+    // 1. Check local cache unless forced (only valid for matching coordinates)
     if (db != null && !forceRefresh) {
       final cached = await _getCachedWeather();
-      if (cached != null) {
+      if (cached != null && _coordinatesMatch(cached, coord)) {
         final timestamp = DateTime.parse(cached['timestamp'] as String);
         if (DateTime.now().difference(timestamp) < cacheDuration) {
           return WeatherTelemetryResult(
@@ -74,7 +76,12 @@ class WeatherRepository {
       final now = DateTime.now();
 
       if (db != null) {
-        await _saveToCache(fresh, timestamp: now);
+        await _saveToCache(
+          fresh,
+          latitude: coord.latitude,
+          longitude: coord.longitude,
+          timestamp: now,
+        );
       }
       return WeatherTelemetryResult(
         condition: fresh,
@@ -82,10 +89,10 @@ class WeatherRepository {
         source: WeatherDataSource.liveApi,
       );
     } catch (_) {
-      // 3. Fallback to existing cache if network fails
+      // 3. Fallback to existing cache only if coordinates match or legacy cache has no coords
       if (db != null) {
         final cached = await _getCachedWeather();
-        if (cached != null) {
+        if (cached != null && _coordinatesMatchOrUnset(cached, coord)) {
           return WeatherTelemetryResult(
             condition: _conditionFromCache(cached),
             updatedAt: DateTime.parse(cached['timestamp'] as String),
@@ -104,6 +111,28 @@ class WeatherRepository {
         source: WeatherDataSource.offlineFallback,
       );
     }
+  }
+
+  bool _coordinatesMatch(
+    Map<String, dynamic> cached,
+    AnonymizedCoordinate target,
+  ) {
+    final cachedLat = (cached['latitude'] as num?)?.toDouble();
+    final cachedLon = (cached['longitude'] as num?)?.toDouble();
+    if (cachedLat == null || cachedLon == null) return false;
+    return (cachedLat - target.latitude).abs() <= 0.02 &&
+        (cachedLon - target.longitude).abs() <= 0.02;
+  }
+
+  bool _coordinatesMatchOrUnset(
+    Map<String, dynamic> cached,
+    AnonymizedCoordinate target,
+  ) {
+    final cachedLat = (cached['latitude'] as num?)?.toDouble();
+    final cachedLon = (cached['longitude'] as num?)?.toDouble();
+    if (cachedLat == null || cachedLon == null) return true;
+    return (cachedLat - target.latitude).abs() <= 0.02 &&
+        (cachedLon - target.longitude).abs() <= 0.02;
   }
 
   ClimateCondition _conditionFromCache(Map<String, dynamic> cached) {
@@ -127,6 +156,8 @@ class WeatherRepository {
 
   Future<void> _saveToCache(
     ClimateCondition condition, {
+    required double latitude,
+    required double longitude,
     DateTime? timestamp,
   }) async {
     await db!.insert(
@@ -138,6 +169,8 @@ class WeatherRepository {
         'relative_humidity': condition.relativeHumidity,
         'apparent_temperature_celsius': condition.apparentTemperatureCelsius,
         'condition_label': 'Live Weather',
+        'latitude': latitude,
+        'longitude': longitude,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );

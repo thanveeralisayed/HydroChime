@@ -40,6 +40,14 @@ dependencies:
   path: ^1.9.1
   http: ^1.6.0
   intl: ^0.20.3
+  flutter_local_notifications: ^23.0.0
+  timezone: ^0.11.2
+  flutter_timezone: ^5.1.1
+  share_plus: ^13.3.1
+  file_picker: ^13.3.2
+  geolocator: ^14.1.2
+  package_info_plus: ^10.2.2
+  sqflite_common_ffi: ^2.4.6
 
 dev_dependencies:
   flutter_test:
@@ -51,7 +59,6 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
-  sqflite_common_ffi: ^2.4.6
   mocktail: ^1.0.5
 
 # For information on the generic Dart part of this file, see the
@@ -64,6 +71,14 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  fonts:
+    - family: Plus Jakarta Sans
+      fonts:
+        - asset: assets/fonts/PlusJakartaSans-Variable.ttf
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Variable.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

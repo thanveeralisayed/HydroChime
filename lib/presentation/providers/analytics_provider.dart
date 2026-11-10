@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../domain/calculators/consistency_calculator.dart';
 import '../../domain/models/beverage_type.dart';
 import '../../domain/models/intake_log.dart';
+import '../../domain/services/notification_scheduler.dart';
 import 'hydration_providers.dart';
 
 enum AnalyticsRange {
@@ -47,6 +48,7 @@ class AnalyticsData {
   final int targetsMetCount;
   final int totalPeriodDays;
   final List<AnalyticsBeverageStat> beverageStats;
+  final int outsideWindowMl;
 
   const AnalyticsData({
     required this.range,
@@ -57,6 +59,7 @@ class AnalyticsData {
     required this.targetsMetCount,
     required this.totalPeriodDays,
     required this.beverageStats,
+    this.outsideWindowMl = 0,
   });
 }
 
@@ -86,11 +89,13 @@ final analyticsProvider = FutureProvider<AnalyticsData>((ref) async {
   final today = DateTime(now.year, now.month, now.day);
   final targetMl = hydrationState.targetVolumeMl;
   final startHour = profile.activeWindowStartHour;
-  final endHour = profile.activeWindowEndHour > startHour
-      ? profile.activeWindowEndHour
-      : 22;
-  final windowHours = math.max(1, endHour - startHour);
-  final targetHourlyVolume = math.max(1, (targetMl / windowHours).round());
+  final endHour = profile.activeWindowEndHour;
+  final resolvedWindow = NotificationScheduler.resolveWindowHours(
+    startHour,
+    endHour,
+  );
+  final windowHours = math.max(1, resolvedWindow);
+  final isOvernight = resolvedWindow > 0 && endHour < startHour;
 
   final totalPeriodDays = switch (range) {
     AnalyticsRange.day => 1,
@@ -98,20 +103,23 @@ final analyticsProvider = FutureProvider<AnalyticsData>((ref) async {
     AnalyticsRange.month => 30,
   };
   final rangeStart = today.subtract(Duration(days: totalPeriodDays - 1));
+  final queryStart =
+      isOvernight ? rangeStart.subtract(const Duration(days: 1)) : rangeStart;
 
-  final logs = await intakeRepo.getLogsForDateRange(rangeStart, today);
+  final allLogs = await intakeRepo.getLogsForDateRange(queryStart, today);
   final savedGoals = await intakeRepo.getAdjustedGoalsForDateRange(
     rangeStart,
     today,
   );
 
-  // Partition logs by day and calculate beverage totals
+  // Partition logs by day (only within [rangeStart..today]) and calculate raw beverage totals
   final logsByDay = <DateTime, List<IntakeLog>>{};
   final rawByBeverage = <BeverageType, int>{
     for (final type in BeverageType.values) type: 0,
   };
 
-  for (final log in logs) {
+  for (final log in allLogs) {
+    if (log.timestamp.isBefore(rangeStart)) continue;
     final dayKey = DateTime(
       log.timestamp.year,
       log.timestamp.month,
@@ -122,12 +130,50 @@ final analyticsProvider = FutureProvider<AnalyticsData>((ref) async {
         (rawByBeverage[log.beverageType] ?? 0) + log.volumeMl;
   }
 
-  List<int> hourlyBucketForDay(List<IntakeLog> dayLogs) {
+  ({List<int> buckets, int outsideMl}) hourlyBucketForDay(
+    List<IntakeLog> dayLogs,
+  ) {
     final dist = List<int>.filled(windowHours, 0);
+    int outside = 0;
     for (final log in dayLogs) {
       final h = log.timestamp.hour;
-      if (h >= startHour && h < endHour) {
-        dist[h - startHour] += log.volumeMl;
+      if (!NotificationScheduler.isHourInActiveWindow(
+        hour: h,
+        startHour: startHour,
+        endHour: endHour,
+      )) {
+        outside += log.effectiveVolumeMl;
+        continue;
+      }
+      if (!isOvernight) {
+        dist[h - startHour] += log.effectiveVolumeMl;
+      } else {
+        if (h >= startHour) {
+          dist[h - startHour] += log.effectiveVolumeMl;
+        } else {
+          dist[(24 - startHour) + h] += log.effectiveVolumeMl;
+        }
+      }
+    }
+    return (buckets: dist, outsideMl: outside);
+  }
+
+  List<int> hourlyBucketForOvernightShift(DateTime shiftStartDay) {
+    final shiftStart = DateTime(
+      shiftStartDay.year,
+      shiftStartDay.month,
+      shiftStartDay.day,
+      startHour,
+    );
+    final shiftEnd = shiftStart.add(Duration(hours: windowHours));
+    final dist = List<int>.filled(windowHours, 0);
+    for (final log in allLogs) {
+      if (!log.timestamp.isBefore(shiftStart) &&
+          log.timestamp.isBefore(shiftEnd)) {
+        final idx = log.timestamp.difference(shiftStart).inHours;
+        if (idx >= 0 && idx < windowHours) {
+          dist[idx] += log.effectiveVolumeMl;
+        }
       }
     }
     return dist;
@@ -138,18 +184,30 @@ final analyticsProvider = FutureProvider<AnalyticsData>((ref) async {
   late final int periodTotalMl;
   late final int dailyAverageMl;
   late final int targetsMetCount;
+  int outsideWindowMl = 0;
 
   if (range == AnalyticsRange.day) {
     final todayLogs = logsByDay[today] ?? const <IntakeLog>[];
-    final hourly = hourlyBucketForDay(todayLogs);
+    final distributed = hourlyBucketForDay(todayLogs);
+    outsideWindowMl = distributed.outsideMl;
 
+    final List<int> hourly;
+    if (!isOvernight) {
+      hourly = distributed.buckets;
+    } else {
+      final shiftAnchor =
+          now.hour < startHour ? today.subtract(const Duration(days: 1)) : today;
+      hourly = hourlyBucketForOvernightShift(shiftAnchor);
+    }
+
+    final targetHourlyVolume = math.max(1, (targetMl / windowHours).round());
     consistencyScore = consistencyCalculator.calculateConsistencyScore(
       hourlyLogs: hourly,
       targetHourlyVolume: targetHourlyVolume,
     );
 
     bars = List.generate(hourly.length, (index) {
-      final hour = startHour + index;
+      final hour = (startHour + index) % 24;
       final hour12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
       final periodSuffix = hour < 12 ? 'a' : 'p';
       final fullSuffix = hour < 12 ? 'AM' : 'PM';
@@ -177,21 +235,41 @@ final analyticsProvider = FutureProvider<AnalyticsData>((ref) async {
       final dayLogs = logsByDay[normalizedDay] ?? const <IntakeLog>[];
       final vol = dayLogs.fold<int>(0, (sum, l) => sum + l.effectiveVolumeMl);
 
-      totalEff += vol;
-      if (dayLogs.isNotEmpty) {
-        loggedDays++;
-        final hourly = hourlyBucketForDay(dayLogs);
-        consistencyScores.add(
-          consistencyCalculator.calculateConsistencyScore(
-            hourlyLogs: hourly,
-            targetHourlyVolume: targetHourlyVolume,
-          ),
-        );
-      }
-
       final dateKey =
           '${normalizedDay.year}-${normalizedDay.month.toString().padLeft(2, '0')}-${normalizedDay.day.toString().padLeft(2, '0')}';
       final dayGoal = savedGoals[dateKey] ?? targetMl;
+      final dayTargetHourly = math.max(1, (dayGoal / windowHours).round());
+
+      totalEff += vol;
+      if (dayLogs.isNotEmpty) {
+        loggedDays++;
+      }
+
+      if (!isOvernight) {
+        if (dayLogs.isNotEmpty) {
+          final distributed = hourlyBucketForDay(dayLogs);
+          consistencyScores.add(
+            consistencyCalculator.calculateConsistencyScore(
+              hourlyLogs: distributed.buckets,
+              targetHourlyVolume: dayTargetHourly,
+            ),
+          );
+        }
+      } else {
+        final shiftAnchor = now.hour < startHour
+            ? normalizedDay.subtract(const Duration(days: 1))
+            : normalizedDay;
+        final buckets = hourlyBucketForOvernightShift(shiftAnchor);
+        if (buckets.any((v) => v > 0)) {
+          consistencyScores.add(
+            consistencyCalculator.calculateConsistencyScore(
+              hourlyLogs: buckets,
+              targetHourlyVolume: dayTargetHourly,
+            ),
+          );
+        }
+      }
+
       if (dayGoal > 0 && vol >= dayGoal) {
         metCount++;
       }
@@ -244,5 +322,6 @@ final analyticsProvider = FutureProvider<AnalyticsData>((ref) async {
     targetsMetCount: targetsMetCount,
     totalPeriodDays: totalPeriodDays,
     beverageStats: stats,
+    outsideWindowMl: outsideWindowMl,
   );
-});
+}, retry: (_, _) => null);

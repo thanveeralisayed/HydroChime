@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'app_colors.dart';
+import 'app_typography.dart';
 
 abstract class AppTheme {
   static ThemeData get dark => ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,
+        fontFamily: AppTypography.bodyFontFamily,
         scaffoldBackgroundColor: AppColors.darkCanvas,
         colorScheme: const ColorScheme.dark(
           surface: AppColors.darkSurfaceCard,
@@ -18,6 +20,7 @@ abstract class AppTheme {
   static ThemeData get light => ThemeData(
         useMaterial3: true,
         brightness: Brightness.light,
+        fontFamily: AppTypography.bodyFontFamily,
         scaffoldBackgroundColor: AppColors.lightCanvas,
         colorScheme: const ColorScheme.light(
           surface: AppColors.lightSurfaceCard,

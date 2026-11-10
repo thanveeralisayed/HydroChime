@@ -146,6 +146,101 @@ void main() {
       expect(weatherRepo.isHeatSpikeDelta(previous: previous, current: currentSpike), isTrue);
       expect(weatherRepo.isHeatSpikeDelta(previous: previous, current: currentMild), isFalse);
     });
+
+    test('invalidates weather cache when coordinates change to another city', () async {
+      final db = await appDatabase.database;
+      int apiCallCount = 0;
+      final mockClient = MockClient((request) async {
+        apiCallCount++;
+        final isAustin = request.url.queryParameters['latitude']?.startsWith('30.') ?? false;
+        return http.Response(
+          jsonEncode({
+            'current': {
+              'temperature_2m': isAustin ? 31.0 : 14.0,
+              'relative_humidity_2m': isAustin ? 38 : 76,
+              'apparent_temperature': isAustin ? 35.0 : 13.0,
+            }
+          }),
+          200,
+        );
+      });
+
+      final repo = WeatherRepository(
+        db: db,
+        apiClient: WeatherApiClient(client: mockClient),
+      );
+
+      final austin = await repo.getOrFetchWeatherWithMeta(
+        latitude: 30.27,
+        longitude: -97.74,
+      );
+      expect(austin.condition.temperatureCelsius, 31.0);
+      expect(apiCallCount, 1);
+
+      // Switching to Seattle immediately must bypass Austin's fresh cache
+      final seattle = await repo.getOrFetchWeatherWithMeta(
+        latitude: 47.61,
+        longitude: -122.33,
+      );
+      expect(seattle.condition.temperatureCelsius, 14.0);
+      expect(seattle.source, WeatherDataSource.liveApi);
+      expect(apiCallCount, 2);
+    });
+
+    test('returns neutral offlineFallback when offline after switching to uncached city', () async {
+      final db = await appDatabase.database;
+      await db.insert('weather_cache', {
+        'id': 1,
+        'timestamp': DateTime.now().toIso8601String(),
+        'temperature_celsius': 38.0,
+        'relative_humidity': 20.0,
+        'apparent_temperature_celsius': 39.0,
+        'condition_label': 'Live Weather',
+        'latitude': 33.45,
+        'longitude': -112.07,
+      });
+
+      final repo = WeatherRepository(
+        db: db,
+        apiClient: WeatherApiClient(
+          client: MockClient((_) async => throw http.ClientException('Offline')),
+        ),
+      );
+
+      final result = await repo.getOrFetchWeatherWithMeta(
+        latitude: 51.51,
+        longitude: -0.13,
+      );
+      expect(result.source, WeatherDataSource.offlineFallback);
+      expect(result.condition.temperatureCelsius, 21.0);
+    });
+
+    test('searchCities parses Open-Meteo geocoding results cleanly', () async {
+      final mockClient = MockClient((request) async {
+        expect(request.url.host, 'geocoding-api.open-meteo.com');
+        return http.Response(
+          jsonEncode({
+            'results': [
+              {
+                'name': 'Denver',
+                'country': 'United States',
+                'admin1': 'Colorado',
+                'latitude': 39.7392,
+                'longitude': -104.9847,
+              }
+            ]
+          }),
+          200,
+        );
+      });
+
+      final client = WeatherApiClient(client: mockClient);
+      final results = await client.searchCities('Denver');
+      expect(results.length, 1);
+      expect(results.first.name, 'Denver');
+      expect(results.first.displayName, 'Denver, Colorado, United States');
+      expect(results.first.latitude, closeTo(39.74, 0.01));
+    });
   });
 }
 

@@ -86,8 +86,17 @@ void main() {
       final materialApp = tester.widget<MaterialApp>(find.byType(MaterialApp));
       expect(materialApp.themeMode, ThemeMode.light);
 
+      // Lifecycle resume check runs cleanly with zero pending timers
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+
       // Unmount ProviderScope before closing DB
       await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    test('initializeHydroChimeRuntime initializes database factory cleanly',
+        () async {
+      await initializeHydroChimeRuntime();
     });
   });
 }

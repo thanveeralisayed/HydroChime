@@ -201,6 +201,37 @@ void main() {
       expect(hourlyList[0], 0);
     });
 
+    test('getHourlyDistribution sums effectiveVolumeMl and tracks overnight shift across midnight',
+        () async {
+      // Shift: 20:00 on Nov 10 -> 08:00 on Nov 11
+      final shiftEvening = DateTime(2026, 11, 10, 22, 15); // bucket 2 (20+2=22)
+      final shiftLateNight = DateTime(2026, 11, 11, 2, 30); // bucket 6 (20+6=26 -> 02:00)
+
+      await intakeLogRepository.insertLog(IntakeLog(
+        timestamp: shiftEvening,
+        volumeMl: 350,
+        beverageType: BeverageType.electrolytes,
+        effectiveVolumeMl: 508,
+      ));
+      await intakeLogRepository.insertLog(IntakeLog(
+        timestamp: shiftLateNight,
+        volumeMl: 300,
+        beverageType: BeverageType.water,
+        effectiveVolumeMl: 300,
+      ));
+
+      final distAt03Am = await intakeLogRepository.getHourlyDistribution(
+        date: DateTime(2026, 11, 11, 3, 0),
+        startHour: 20,
+        endHour: 8,
+        resolveActiveShift: true,
+      );
+
+      expect(distAt03Am.length, 12);
+      expect(distAt03Am[2], 508); // uses effectiveVolumeMl, not raw 350!
+      expect(distAt03Am[6], 300);
+    });
+
     test('upserts and reads daily_summaries records accurately', () async {
       final date = DateTime(2026, 11, 10);
       await intakeLogRepository.upsertDailySummary(
@@ -248,7 +279,7 @@ void main() {
         },
       );
 
-      await AppDatabase.migrateDatabaseForTest(legacyDb, 1, 2);
+      await AppDatabase.migrateDatabaseForTest(legacyDb, 1, 3);
       final repo = UserProfileRepository(legacyDb);
       final upgraded = await repo.getUserProfile();
       expect(upgraded.weightKg, 68.0);
@@ -259,6 +290,40 @@ void main() {
       expect(upgraded.cityName, 'Austin');
 
       await legacyDb.close();
+    });
+
+    test('supports updating existing intake log volume, type, and timestamp', () async {
+      final originalTime = DateTime(2026, 11, 10, 9, 0);
+      final id = await intakeLogRepository.insertLog(IntakeLog(
+        timestamp: originalTime,
+        volumeMl: 250,
+        beverageType: BeverageType.water,
+        effectiveVolumeMl: 250,
+      ));
+
+      final editedTime = DateTime(2026, 11, 10, 7, 30);
+      await intakeLogRepository.updateLog(IntakeLog(
+        id: id,
+        timestamp: editedTime,
+        volumeMl: 500,
+        beverageType: BeverageType.electrolytes,
+        effectiveVolumeMl: 725,
+      ));
+
+      final logs = await intakeLogRepository.getLogsForDate(originalTime);
+      expect(logs.length, 1);
+      expect(logs.first.timestamp, editedTime);
+      expect(logs.first.volumeMl, 500);
+      expect(logs.first.beverageType, BeverageType.electrolytes);
+      expect(logs.first.effectiveVolumeMl, 725);
+    });
+
+    test('v3 weather_cache schema includes latitude and longitude columns', () async {
+      final db = await appDatabase.database;
+      final cols = await db.rawQuery("PRAGMA table_info('weather_cache')");
+      final colNames = cols.map((c) => c['name'] as String).toSet();
+      expect(colNames.contains('latitude'), isTrue);
+      expect(colNames.contains('longitude'), isTrue);
     });
   });
 }

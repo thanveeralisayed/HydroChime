@@ -6,7 +6,10 @@ import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_typography.dart';
 import '../../domain/calculators/hydration_calculator.dart';
 import '../../domain/models/beverage_type.dart';
+import '../../domain/models/intake_log.dart';
+import '../providers/analytics_provider.dart';
 import '../providers/hydration_providers.dart';
+import '../widgets/beverage_log_dialog.dart';
 import '../widgets/profile_calibration_sheet.dart';
 import '../widgets/quick_log_bar.dart';
 import '../widgets/zen_circular_fluid_gauge.dart';
@@ -39,25 +42,64 @@ class _TodayDashboardScreenState extends ConsumerState<TodayDashboardScreen> {
     });
   }
 
+  void _showLoggedFeedback(int amountMl, BeverageType type) {
+    const calc = HydrationCalculator();
+    final eff = calc.calculateEffectiveIntake(amountMl, type);
+    if (type.multiplier == 1.0) {
+      _showToast('Logged +$amountMl ml');
+    } else {
+      _showToast('Logged +$amountMl ml ($eff ml eff.)');
+    }
+  }
+
   Future<void> _openCustomLogModal() async {
-    final result = await showDialog<({int volumeMl, BeverageType type})>(
-      context: context,
-      builder: (ctx) => const _CustomBeverageDialog(),
+    final result = await showBeverageLogDialog(context);
+    if (result == null || !mounted) return;
+
+    try {
+      await ref.read(hydrationNotifierProvider.notifier).logHydration(
+            amountMl: result.volumeMl,
+            type: result.type,
+            timestamp: result.timestamp,
+          );
+      if (!mounted) return;
+      _showLoggedFeedback(result.volumeMl, result.type);
+    } catch (_) {
+      if (!mounted) return;
+      _showToast('Unable to save hydration log');
+    }
+  }
+
+  Future<void> _editExistingLog(IntakeLog log) async {
+    if (log.id == null) return;
+    final result = await showBeverageLogDialog(
+      context,
+      initialLog: log,
     );
     if (result == null || !mounted) return;
 
-    await ref
-        .read(hydrationNotifierProvider.notifier)
-        .logHydration(amountMl: result.volumeMl, type: result.type);
-    if (!mounted) return;
-
-    const calc = HydrationCalculator();
-    final eff = calc.calculateEffectiveIntake(result.volumeMl, result.type);
-    if (result.type.multiplier == 1.0) {
-      _showToast('Logged +${result.volumeMl} ml');
-    } else {
-      _showToast('Logged +${result.volumeMl} ml ($eff ml eff.)');
+    try {
+      await ref.read(hydrationNotifierProvider.notifier).updateLog(
+            id: log.id!,
+            volumeMl: result.volumeMl,
+            type: result.type,
+            timestamp: result.timestamp,
+          );
+      if (!mounted) return;
+      _showToast('Updated ${result.volumeMl} ml ${result.type.displayName}');
+    } catch (_) {
+      if (!mounted) return;
+      _showToast('Unable to update hydration log');
     }
+  }
+
+  void _openHistorySheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _HydrationHistorySheet(rootRef: ref),
+    );
   }
 
   @override
@@ -66,6 +108,7 @@ class _TodayDashboardScreenState extends ConsumerState<TodayDashboardScreen> {
     final hydrationAsync = ref.watch(hydrationNotifierProvider);
     final profileAsync = ref.watch(userProfileProvider);
     final climate = ref.watch(currentClimateProvider);
+    ref.watch(pacingScheduleProvider);
 
     final profile = switch (profileAsync) {
       AsyncData(:final value) => value,
@@ -88,38 +131,47 @@ class _TodayDashboardScreenState extends ConsumerState<TodayDashboardScreen> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'HydroChime',
-                            style: AppTypography.headlineMedium(
-                              color: palette.textPrimary,
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'HydroChime',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppTypography.headlineMedium(
+                                color: palette.textPrimary,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 2),
-                          Row(
-                            children: [
-                              Container(
-                                width: 6,
-                                height: 6,
-                                decoration: BoxDecoration(
-                                  color: palette.primaryAtmosphere,
-                                  shape: BoxShape.circle,
+                            const SizedBox(height: 2),
+                            Row(
+                              children: [
+                                Container(
+                                  width: 6,
+                                  height: 6,
+                                  decoration: BoxDecoration(
+                                    color: palette.primaryAtmosphere,
+                                    shape: BoxShape.circle,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                '$cityName • ${climate.temperatureCelsius.round()}°C',
-                                style: TextStyle(
-                                  color: palette.textSecondary,
-                                  fontSize: 12,
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    '$cityName • ${climate.temperatureCelsius.round()}°C',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: palette.textSecondary,
+                                      fontSize: 12,
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ],
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
+                      const SizedBox(width: 8),
                       Row(
                         children: [
                           IconButton(
@@ -195,13 +247,19 @@ class _TodayDashboardScreenState extends ConsumerState<TodayDashboardScreen> {
                             ),
                           ),
                           const SizedBox(height: 24),
-                          // Quick Log Action Bar
+                          // Quick Log Action Bar (tap = water, long-press = any beverage)
                           QuickLogBar(
-                            onLog: (amount, type) {
-                              ref
-                                  .read(hydrationNotifierProvider.notifier)
-                                  .logHydration(amountMl: amount, type: type);
-                              _showToast('Logged +$amount ml');
+                            onLog: (amount, type) async {
+                              try {
+                                await ref
+                                    .read(hydrationNotifierProvider.notifier)
+                                    .logHydration(amountMl: amount, type: type);
+                                if (!mounted) return;
+                                _showLoggedFeedback(amount, type);
+                              } catch (_) {
+                                if (!mounted) return;
+                                _showToast('Unable to save hydration log');
+                              }
                             },
                             onCustomAdd: _openCustomLogModal,
                           ),
@@ -210,17 +268,45 @@ class _TodayDashboardScreenState extends ConsumerState<TodayDashboardScreen> {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Text(
-                                'Recent Activity',
-                                style: AppTypography.labelMicro(
-                                  color: palette.textSecondary,
+                              Expanded(
+                                child: Text(
+                                  'Recent Activity',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: AppTypography.labelMicro(
+                                    color: palette.textSecondary,
+                                  ),
                                 ),
                               ),
-                              Text(
-                                'Auto-balanced',
-                                style: TextStyle(
-                                  color: palette.textTertiary,
-                                  fontSize: 12,
+                              const SizedBox(width: 8),
+                              InkWell(
+                                key: const Key('history_button'),
+                                onTap: _openHistorySheet,
+                                borderRadius: BorderRadius.circular(9999),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.history,
+                                        size: 13,
+                                        color: palette.primaryAtmosphere,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'History',
+                                        style: TextStyle(
+                                          color: palette.primaryAtmosphere,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               ),
                             ],
@@ -244,99 +330,113 @@ class _TodayDashboardScreenState extends ConsumerState<TodayDashboardScreen> {
                               final timeStr =
                                   DateFormat('h:mm a').format(log.timestamp);
                               final hasBonus = log.beverageType.multiplier != 1.0;
-                              return Container(
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 12),
-                                decoration: BoxDecoration(
-                                  border: Border(
-                                    bottom: BorderSide(
-                                      color: palette.borderSubtle,
+                              return InkWell(
+                                key: log.id != null
+                                    ? Key('recent_log_item_${log.id}')
+                                    : null,
+                                onTap: () => _editExistingLog(log),
+                                child: Container(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 12),
+                                  decoration: BoxDecoration(
+                                    border: Border(
+                                      bottom: BorderSide(
+                                        color: palette.borderSubtle,
+                                      ),
                                     ),
                                   ),
-                                ),
-                                child: Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          log.beverageType.displayName,
-                                          style: TextStyle(
-                                            color: palette.textPrimary,
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 2),
-                                        Text(
-                                          hasBonus
-                                              ? '$timeStr • ${log.effectiveVolumeMl} ml eff.'
-                                              : timeStr,
-                                          style: TextStyle(
-                                            color: palette.textTertiary,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    Row(
-                                      children: [
-                                        Text(
-                                          '+${log.volumeMl} ml',
-                                          style: TextStyle(
-                                            color: palette.primaryAtmosphere,
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                        if (log.id != null) ...[
-                                          const SizedBox(width: 4),
-                                          IconButton(
-                                            tooltip: 'Remove entry',
-                                            padding: EdgeInsets.zero,
-                                            constraints: const BoxConstraints(
-                                              minWidth: 28,
-                                              minHeight: 28,
+                                  child: Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              log.beverageType.displayName,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: palette.textPrimary,
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w500,
+                                              ),
                                             ),
-                                            onPressed: () async {
-                                              await ref
-                                                  .read(hydrationNotifierProvider
-                                                      .notifier)
-                                                  .deleteLog(log.id!);
-                                              if (!context.mounted) return;
-                                              ScaffoldMessenger.of(context)
-                                                ..hideCurrentSnackBar()
-                                                ..showSnackBar(
-                                                  SnackBar(
-                                                    content: Text(
-                                                      'Removed ${log.volumeMl} ml ${log.beverageType.displayName}',
-                                                    ),
-                                                    action: SnackBarAction(
-                                                      label: 'Undo',
-                                                      onPressed: () {
-                                                        ref
-                                                            .read(
-                                                                hydrationNotifierProvider
-                                                                    .notifier)
-                                                            .restoreLog(log);
-                                                      },
-                                                    ),
-                                                  ),
-                                                );
-                                            },
-                                            icon: Icon(
-                                              Icons.close,
-                                              size: 16,
-                                              color: palette.textTertiary,
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              hasBonus
+                                                  ? '$timeStr • ${log.effectiveVolumeMl} ml eff.'
+                                                  : timeStr,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: palette.textTertiary,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Row(
+                                        children: [
+                                          Text(
+                                            '+${log.volumeMl} ml',
+                                            style: TextStyle(
+                                              color: palette.primaryAtmosphere,
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w500,
                                             ),
                                           ),
+                                          if (log.id != null) ...[
+                                            const SizedBox(width: 4),
+                                            IconButton(
+                                              tooltip: 'Remove entry',
+                                              padding: EdgeInsets.zero,
+                                              constraints: const BoxConstraints(
+                                                minWidth: 28,
+                                                minHeight: 28,
+                                              ),
+                                              onPressed: () async {
+                                                await ref
+                                                    .read(
+                                                        hydrationNotifierProvider
+                                                            .notifier)
+                                                    .deleteLog(log.id!);
+                                                if (!context.mounted) return;
+                                                ScaffoldMessenger.of(context)
+                                                  ..hideCurrentSnackBar()
+                                                  ..showSnackBar(
+                                                    SnackBar(
+                                                      content: Text(
+                                                        'Removed ${log.volumeMl} ml ${log.beverageType.displayName}',
+                                                      ),
+                                                      action: SnackBarAction(
+                                                        label: 'Undo',
+                                                        onPressed: () {
+                                                          ref
+                                                              .read(
+                                                                  hydrationNotifierProvider
+                                                                      .notifier)
+                                                              .restoreLog(log);
+                                                        },
+                                                      ),
+                                                    ),
+                                                  );
+                                              },
+                                              icon: Icon(
+                                                Icons.close,
+                                                size: 16,
+                                                color: palette.textTertiary,
+                                              ),
+                                            ),
+                                          ],
                                         ],
-                                      ],
-                                    ),
-                                  ],
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               );
                             }),
@@ -414,140 +514,346 @@ class _TodayDashboardScreenState extends ConsumerState<TodayDashboardScreen> {
   }
 }
 
-class _CustomBeverageDialog extends StatefulWidget {
-  const _CustomBeverageDialog();
+class _HydrationHistorySheet extends ConsumerStatefulWidget {
+  final WidgetRef rootRef;
+
+  const _HydrationHistorySheet({required this.rootRef});
 
   @override
-  State<_CustomBeverageDialog> createState() => _CustomBeverageDialogState();
+  ConsumerState<_HydrationHistorySheet> createState() =>
+      _HydrationHistorySheetState();
 }
 
-class _CustomBeverageDialogState extends State<_CustomBeverageDialog> {
-  late final TextEditingController _controller;
-  BeverageType _selectedType = BeverageType.water;
-  String? _errorText;
+class _HydrationHistorySheetState
+    extends ConsumerState<_HydrationHistorySheet> {
+  late DateTime _selectedDate;
+  List<IntakeLog> _logs = const [];
+  int _effectiveTotalMl = 0;
+  bool _loading = true;
+
+  DateTime get _today {
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day);
+  }
 
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: '250');
+    _selectedDate = _today;
+    _loadLogsForDate();
   }
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+  Future<void> _loadLogsForDate() async {
+    setState(() => _loading = true);
+    final repo = await widget.rootRef.read(intakeLogRepositoryProvider.future);
+    final logs = await repo.getLogsForDate(_selectedDate);
+    final effTotal = await repo.getEffectiveVolumeForDate(_selectedDate);
+    if (!mounted) return;
+    setState(() {
+      _logs = logs;
+      _effectiveTotalMl = effTotal;
+      _loading = false;
+    });
+  }
+
+  Future<void> _stepDate(int days) async {
+    final next = _selectedDate.add(Duration(days: days));
+    if (next.isAfter(_today)) return;
+    setState(() => _selectedDate = next);
+    await _loadLogsForDate();
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime(2020),
+      lastDate: _today,
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _selectedDate = DateTime(picked.year, picked.month, picked.day);
+    });
+    await _loadLogsForDate();
+  }
+
+  Future<void> _addLogForSelectedDate() async {
+    final res = await showBeverageLogDialog(
+      context,
+      targetDate: _selectedDate,
+    );
+    if (res == null || !mounted) return;
+    await widget.rootRef.read(hydrationNotifierProvider.notifier).logHydration(
+          amountMl: res.volumeMl,
+          type: res.type,
+          timestamp: res.timestamp,
+        );
+    widget.rootRef.invalidate(analyticsProvider);
+    await _loadLogsForDate();
+  }
+
+  Future<void> _editHistoryLog(IntakeLog log) async {
+    if (log.id == null) return;
+    final res = await showBeverageLogDialog(
+      context,
+      initialLog: log,
+    );
+    if (res == null || !mounted) return;
+    await widget.rootRef.read(hydrationNotifierProvider.notifier).updateLog(
+          id: log.id!,
+          volumeMl: res.volumeMl,
+          type: res.type,
+          timestamp: res.timestamp,
+        );
+    widget.rootRef.invalidate(analyticsProvider);
+    await _loadLogsForDate();
+  }
+
+  Future<void> _deleteHistoryLog(IntakeLog log) async {
+    if (log.id == null) return;
+    await widget.rootRef
+        .read(hydrationNotifierProvider.notifier)
+        .deleteLog(log.id!);
+    widget.rootRef.invalidate(analyticsProvider);
+    await _loadLogsForDate();
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = HydroChimeColors.of(context);
-    final rawVal = int.tryParse(_controller.text.trim()) ?? 0;
-    final effectiveVal =
-        const HydrationCalculator().calculateEffectiveIntake(rawVal, _selectedType);
+    final isToday = _selectedDate == _today;
+    final isYesterday =
+        _selectedDate == _today.subtract(const Duration(days: 1));
+    final dateTitle = isToday
+        ? 'Today • ${DateFormat('MMM d').format(_selectedDate)}'
+        : isYesterday
+            ? 'Yesterday • ${DateFormat('MMM d').format(_selectedDate)}'
+            : DateFormat('EEE, MMM d, yyyy').format(_selectedDate);
 
-    return AlertDialog(
-      backgroundColor: palette.surfaceElevated,
-      title: Text(
-        'Log Beverage & Volume',
-        style: AppTypography.headlineMedium(color: palette.textPrimary),
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.78,
       ),
-      content: SingleChildScrollView(
+      decoration: BoxDecoration(
+        color: palette.surfaceElevated,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        border: Border.all(color: palette.borderSubtle),
+      ),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+      child: SafeArea(
+        top: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Beverage Type',
-              style: TextStyle(color: palette.textSecondary, fontSize: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Hydration History',
+                  style: AppTypography.headlineMedium(color: palette.textPrimary),
+                ),
+                IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: Icon(Icons.close, color: palette.textSecondary),
+                ),
+              ],
             ),
             const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: BeverageType.values.map((type) {
-                final isSelected = _selectedType == type;
-                return ChoiceChip(
-                  label: Text(
-                    type.displayName,
-                    style: TextStyle(
-                      color: isSelected
-                          ? (palette.isDark ? Colors.black : Colors.white)
+            // Date Navigator
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              decoration: BoxDecoration(
+                color: palette.surfaceCard,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: palette.borderSubtle),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  IconButton(
+                    key: const Key('history_prev_day'),
+                    tooltip: 'Previous day',
+                    onPressed: () => _stepDate(-1),
+                    icon: Icon(Icons.chevron_left, color: palette.textPrimary),
+                  ),
+                  InkWell(
+                    key: const Key('history_date_picker_button'),
+                    onTap: _pickDate,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 6,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.calendar_today_outlined,
+                            size: 14,
+                            color: palette.primaryAtmosphere,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            dateTitle,
+                            style: TextStyle(
+                              color: palette.textPrimary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    key: const Key('history_next_day'),
+                    tooltip: 'Next day',
+                    onPressed: isToday ? null : () => _stepDate(1),
+                    icon: Icon(
+                      Icons.chevron_right,
+                      color: isToday
+                          ? palette.textTertiary.withOpacity(0.4)
                           : palette.textPrimary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Effective intake: $_effectiveTotalMl ml',
+                  style: TextStyle(
+                    color: palette.primaryAtmosphere,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                TextButton.icon(
+                  key: const Key('history_add_button'),
+                  onPressed: _addLogForSelectedDate,
+                  icon: Icon(
+                    Icons.add,
+                    size: 15,
+                    color: palette.primaryAtmosphere,
+                  ),
+                  label: Text(
+                    'Add entry',
+                    style: TextStyle(
+                      color: palette.primaryAtmosphere,
                       fontSize: 12,
                     ),
                   ),
-                  selected: isSelected,
-                  selectedColor: palette.primaryVital,
-                  backgroundColor: palette.surfaceCard,
-                  side: BorderSide(color: palette.borderSubtle),
-                  onSelected: (_) => setState(() => _selectedType = type),
-                );
-              }).toList(),
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _controller,
-              keyboardType: TextInputType.number,
-              style: TextStyle(color: palette.textPrimary),
-              onChanged: (_) => setState(() => _errorText = null),
-              decoration: InputDecoration(
-                labelText: 'Volume (mL)',
-                errorText: _errorText,
-                labelStyle: TextStyle(color: palette.textSecondary),
-                enabledBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: palette.borderSubtle),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: palette.primaryVital),
-                ),
-                errorBorder: const OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.redAccent),
-                ),
-                focusedErrorBorder: const OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.redAccent),
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              rawVal > 0
-                  ? '$rawVal ml × ${_selectedType.multiplier}x = $effectiveVal ml effective'
-                  : 'Efficiency multiplier: ${_selectedType.multiplier}x',
-              style: TextStyle(
-                color: palette.primaryAtmosphere,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
+            const SizedBox(height: 6),
+            Flexible(
+              child: _loading
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: CircularProgressIndicator(
+                          color: palette.primaryVital,
+                        ),
+                      ),
+                    )
+                  : _logs.isEmpty
+                      ? Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 28),
+                          child: Center(
+                            child: Text(
+                              'No entries recorded for this date',
+                              style: TextStyle(
+                                color: palette.textTertiary,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                        )
+                      : ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: _logs.length,
+                          itemBuilder: (_, idx) {
+                            final log = _logs[idx];
+                            final timeStr =
+                                DateFormat('h:mm a').format(log.timestamp);
+                            return InkWell(
+                              onTap: () => _editHistoryLog(log),
+                              child: Container(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 10),
+                                decoration: BoxDecoration(
+                                  border: Border(
+                                    bottom:
+                                        BorderSide(color: palette.borderSubtle),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          log.beverageType.displayName,
+                                          style: TextStyle(
+                                            color: palette.textPrimary,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                        Text(
+                                          '$timeStr • ${log.effectiveVolumeMl} ml eff.',
+                                          style: TextStyle(
+                                            color: palette.textTertiary,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    Row(
+                                      children: [
+                                        Text(
+                                          '+${log.volumeMl} ml',
+                                          style: TextStyle(
+                                            color: palette.primaryAtmosphere,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                        if (log.id != null)
+                                          IconButton(
+                                            tooltip: 'Delete entry',
+                                            padding: EdgeInsets.zero,
+                                            constraints: const BoxConstraints(
+                                              minWidth: 28,
+                                              minHeight: 28,
+                                            ),
+                                            onPressed: () =>
+                                                _deleteHistoryLog(log),
+                                            icon: Icon(
+                                              Icons.close,
+                                              size: 16,
+                                              color: palette.textTertiary,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
             ),
           ],
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: Text(
-            'Cancel',
-            style: TextStyle(color: palette.textSecondary),
-          ),
-        ),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: palette.primaryVital,
-            foregroundColor: palette.isDark ? Colors.black : Colors.white,
-          ),
-          onPressed: () {
-            final val = int.tryParse(_controller.text.trim());
-            if (val == null || val <= 0 || val > 5000) {
-              setState(
-                () => _errorText = 'Enter a volume between 1 and 5000 ml',
-              );
-              return;
-            }
-            Navigator.pop(context, (volumeMl: val, type: _selectedType));
-          },
-          child: const Text('Log'),
-        ),
-      ],
     );
   }
 }

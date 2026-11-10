@@ -103,6 +103,31 @@ void main() {
       );
       expect(pacing, 200);
     });
+
+    test('supports overnight / shift-worker active windows spanning midnight', () {
+      final now = DateTime(2026, 11, 10, 23, 0); // inside 20:00 -> 08:00 shift (9h left)
+      final slots = scheduler.computeDailySchedule(
+        now: now,
+        activeWindowStartHour: 20,
+        activeWindowEndHour: 8,
+        remainingMl: 1200,
+        mindfulPacingEnabled: true,
+      );
+      expect(slots, isNotEmpty);
+      expect(
+        slots.last.scheduledTime.isBefore(DateTime(2026, 11, 11, 8, 0)),
+        isTrue,
+      );
+
+      final hourly = scheduler.computeRecommendedHourlyPacingMl(
+        now: now,
+        activeWindowStartHour: 20,
+        activeWindowEndHour: 8,
+        remainingMl: 1800,
+        totalTargetMl: 2400,
+      );
+      expect(hourly, 200);
+    });
   });
 }
 

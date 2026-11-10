@@ -26,12 +26,18 @@ class VaultExportService {
       orderBy: 'timestamp ASC',
     );
 
+    final summaryMaps = await _db.query(
+      'daily_summaries',
+      orderBy: 'date ASC',
+    );
+
     final payload = {
-      'version': 1,
+      'version': 2,
       'app': 'HydroChime',
       'exported_at': DateTime.now().toIso8601String(),
       'profile': profileMap,
       'logs': logMaps,
+      'daily_summaries': summaryMaps,
     };
 
     return const JsonEncoder.withIndent('  ').convert(payload);
@@ -73,6 +79,7 @@ class VaultExportService {
 
     final UserProfile parsedProfile;
     final List<IntakeLog> parsedLogs;
+    final List<Map<String, dynamic>> parsedSummaries;
     try {
       parsedProfile = UserProfile.fromMap(
         Map<String, dynamic>.from(decoded['profile'] as Map),
@@ -84,8 +91,27 @@ class VaultExportService {
             ),
           )
           .toList();
+      final rawSummaries = decoded['daily_summaries'];
+      if (rawSummaries == null) {
+        parsedSummaries = const [];
+      } else if (rawSummaries is List) {
+        parsedSummaries = rawSummaries.map((item) {
+          final m = Map<String, dynamic>.from(item as Map);
+          return <String, dynamic>{
+            'date': m['date'] as String,
+            'baseline_goal_ml': (m['baseline_goal_ml'] as num).toInt(),
+            'adjusted_goal_ml': (m['adjusted_goal_ml'] as num).toInt(),
+            'total_ingested_ml': (m['total_ingested_ml'] as num).toInt(),
+            'weather_temp': (m['weather_temp'] as num?)?.toDouble(),
+            'weather_humidity': (m['weather_humidity'] as num?)?.toDouble(),
+            'consistency_score': (m['consistency_score'] as num).toInt(),
+          };
+        }).toList();
+      } else {
+        throw const FormatException('Invalid daily_summaries format');
+      }
     } catch (_) {
-      throw const FormatException('Invalid profile or intake log record in backup');
+      throw const FormatException('Invalid profile, log, or summary record in backup');
     }
 
     await _db.transaction((txn) async {
@@ -97,6 +123,16 @@ class VaultExportService {
       await txn.delete('intake_logs');
       for (final log in parsedLogs) {
         await txn.insert('intake_logs', log.toMap());
+      }
+      if (decoded.containsKey('daily_summaries')) {
+        await txn.delete('daily_summaries');
+        for (final summary in parsedSummaries) {
+          await txn.insert(
+            'daily_summaries',
+            summary,
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
       }
     });
 

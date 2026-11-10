@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hydrochime/domain/models/beverage_type.dart';
@@ -63,6 +64,38 @@ void main() {
 
       expect(loggedAmount, 500);
       expect(loggedType, BeverageType.water);
+    });
+
+    testWidgets('ignores duplicate taps while an async onLog callback is still in flight',
+        (tester) async {
+      int calls = 0;
+      final completer = Completer<void>();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: QuickLogBar(
+              onLog: (_, _) async {
+                calls++;
+                await completer.future;
+              },
+              onCustomAdd: () {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('+250'));
+      await tester.pump();
+      await tester.tap(find.text('+250'));
+      await tester.pump();
+      expect(calls, 1);
+
+      completer.complete();
+      await tester.pump();
+      await tester.tap(find.text('+500'));
+      await tester.pump();
+      expect(calls, 2);
     });
   });
 }
