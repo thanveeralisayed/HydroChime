@@ -7,6 +7,7 @@ import '../../data/database/app_database.dart';
 import '../../data/repositories/intake_log_repository.dart';
 import '../../data/repositories/user_profile_repository.dart';
 import '../../data/repositories/weather_repository.dart';
+import '../../data/services/ip_location_service.dart';
 import '../../data/services/local_notification_service.dart';
 import '../../data/services/location_service.dart';
 import '../../data/services/vault_export_service.dart';
@@ -68,6 +69,18 @@ final vaultTransferServiceProvider = Provider<VaultTransferService>((ref) {
 
 final locationServiceProvider = Provider<LocationService>((ref) {
   return const GeolocatorLocationService();
+});
+
+final ipLocationServiceProvider = Provider<IpLocationService>((ref) {
+  return HttpIpLocationService();
+});
+
+final locationResolverProvider = Provider<LocationResolver>((ref) {
+  return LocationResolver(
+    gpsService: ref.watch(locationServiceProvider),
+    ipLocationService: ref.watch(ipLocationServiceProvider),
+    anonymizer: ref.watch(weatherApiClientProvider),
+  );
 });
 
 final appVersionProvider = FutureProvider<String>((ref) async {
@@ -524,4 +537,162 @@ final pacingScheduleProvider = FutureProvider<PacingScheduleState>((ref) async {
     recommendedHourlyMl: hourly,
     osSchedulingSupported: notificationService.supportsScheduledNotifications,
   );
+});
+
+enum StartupLocationStatus {
+  idle,
+  resolving,
+  resolvedGps,
+  resolvedIp,
+  manualSkipped,
+  failed,
+}
+
+class StartupLocationState {
+  final StartupLocationStatus status;
+  final ResolvedLocation? location;
+  final String? message;
+
+  const StartupLocationState({
+    required this.status,
+    this.location,
+    this.message,
+  });
+
+  static const idle = StartupLocationState(status: StartupLocationStatus.idle);
+}
+
+class LocationBootstrapNotifier extends Notifier<StartupLocationState> {
+  bool _hasAttemptedStartup = false;
+  bool _askedGpsPermissionThisSession = false;
+  Future<StartupLocationState>? _inFlight;
+
+  @override
+  StartupLocationState build() {
+    ref.onDispose(() {
+      _inFlight = null;
+    });
+    return StartupLocationState.idle;
+  }
+
+  Future<StartupLocationState> resolveOnStartup({bool force = false}) {
+    if (!force && _hasAttemptedStartup) {
+      return Future.value(state);
+    }
+    if (_inFlight != null) return _inFlight!;
+
+    final future = _runStartupResolution(force: force);
+    _inFlight = future;
+    future.whenComplete(() {
+      if (identical(_inFlight, future)) {
+        _inFlight = null;
+      }
+    });
+    return future;
+  }
+
+  Future<StartupLocationState> retryIfFailedOnResume() async {
+    if (_inFlight != null) return _inFlight!;
+    if (state.status != StartupLocationStatus.failed) return state;
+    return resolveOnStartup(force: true);
+  }
+
+  Future<StartupLocationState> _runStartupResolution({
+    required bool force,
+  }) async {
+    _hasAttemptedStartup = true;
+    state = const StartupLocationState(
+      status: StartupLocationStatus.resolving,
+    );
+
+    try {
+      final initialProfile = await ref.read(userProfileProvider.future);
+      if (!ref.mounted) return state;
+
+      if (initialProfile.locationMode == LocationMode.manual) {
+        const next = StartupLocationState(
+          status: StartupLocationStatus.manualSkipped,
+        );
+        state = next;
+        return next;
+      }
+
+      final requestGpsPermission = !_askedGpsPermissionThisSession &&
+          (force || initialProfile.locationMode == LocationMode.auto);
+      if (requestGpsPermission) {
+        _askedGpsPermissionThisSession = true;
+      }
+
+      final resolver = ref.read(locationResolverProvider);
+      final resolved = await resolver.resolveLocation(
+        requestGpsPermission: requestGpsPermission,
+      );
+      if (!ref.mounted) return state;
+
+      final latestProfile = await ref.read(userProfileProvider.future);
+      if (!ref.mounted) return state;
+
+      // Respect manual city choices made while OS permission dialog was open.
+      if (!force && latestProfile.locationMode == LocationMode.manual) {
+        const next = StartupLocationState(
+          status: StartupLocationStatus.manualSkipped,
+        );
+        state = next;
+        return next;
+      }
+
+      final locationChanged = latestProfile.cityName != resolved.name ||
+          (latestProfile.latitude - resolved.latitude).abs() > 0.005 ||
+          (latestProfile.longitude - resolved.longitude).abs() > 0.005 ||
+          latestProfile.locationMode != resolved.locationMode;
+
+      if (locationChanged) {
+        final repo = await ref.read(userProfileRepositoryProvider.future);
+        if (!ref.mounted) return state;
+        await repo.updateLocation(
+          resolved.name,
+          resolved.latitude,
+          resolved.longitude,
+          locationMode: resolved.locationMode,
+        );
+        if (!ref.mounted) return state;
+        ref.invalidate(userProfileProvider);
+        await ref.read(userProfileProvider.future);
+        if (!ref.mounted) return state;
+      }
+
+      // Ensure weather info is fetched for the resolved GPS or IP location.
+      try {
+        await ref.read(weatherSyncProvider.future);
+      } catch (_) {
+        // WeatherRepository provides offline fallback safely.
+      }
+      if (!ref.mounted) return state;
+
+      final next = StartupLocationState(
+        status: resolved.source == ResolvedLocationSource.gps
+            ? StartupLocationStatus.resolvedGps
+            : StartupLocationStatus.resolvedIp,
+        location: resolved,
+        message: resolved.source == ResolvedLocationSource.ip
+            ? 'GPS unavailable — using public IP location (${resolved.name}).'
+            : null,
+      );
+      state = next;
+      return next;
+    } catch (e) {
+      if (!ref.mounted) return state;
+      final next = StartupLocationState(
+        status: StartupLocationStatus.failed,
+        message: e.toString(),
+      );
+      state = next;
+      return next;
+    }
+  }
+}
+
+final locationBootstrapProvider =
+    NotifierProvider<LocationBootstrapNotifier, StartupLocationState>(() {
+  return LocationBootstrapNotifier();
 });

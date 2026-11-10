@@ -1,11 +1,17 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:hydrochime/core/theme/app_theme.dart';
 import 'package:hydrochime/data/database/app_database.dart';
 import 'package:hydrochime/data/repositories/intake_log_repository.dart';
 import 'package:hydrochime/data/repositories/user_profile_repository.dart';
+import 'package:hydrochime/data/services/ip_location_service.dart';
 import 'package:hydrochime/data/services/local_notification_service.dart';
+import 'package:hydrochime/data/services/location_service.dart';
+import 'package:hydrochime/data/services/weather_api_client.dart';
 import 'package:hydrochime/domain/models/beverage_type.dart';
 import 'package:hydrochime/domain/models/intake_log.dart';
 import 'package:hydrochime/domain/models/user_profile.dart';
@@ -55,6 +61,34 @@ class _RecordingHydrationNotifier extends HydrationNotifier {
   Future<void> refreshIfNewDay({DateTime? now}) async {
     recordedRefreshChecks.add(now);
     await super.refreshIfNewDay(now: now);
+  }
+}
+
+class _StartupDeniedGpsService implements PermissionAwareLocationService {
+  final List<bool> requestedFlags = [];
+
+  @override
+  Future<({double latitude, double longitude})> getCurrentCoordinates({
+    bool requestPermission = true,
+  }) async {
+    requestedFlags.add(requestPermission);
+    throw const LocationLookupException(
+      'Permission denied',
+      reason: LocationFailureReason.permissionDenied,
+    );
+  }
+}
+
+class _StartupIpService implements IpLocationService {
+  final IpLocationResult result;
+  int calls = 0;
+
+  _StartupIpService(this.result);
+
+  @override
+  Future<IpLocationResult> lookupPublicIpLocation() async {
+    calls++;
+    return result;
   }
 }
 
@@ -468,6 +502,71 @@ void main() {
         spyNotifier.recordedRefreshChecks.first,
         DateTime(2026, 11, 11, 0, 0, 1),
       );
+
+      // Unmount and flush any final sqflite lock timers cleanly
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 15));
+    });
+
+    testWidgets('asks GPS permission on startup and falls back to public IP weather when denied',
+        (tester) async {
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final gpsSpy = _StartupDeniedGpsService();
+      final ipStub = _StartupIpService(
+        const IpLocationResult(
+          latitude: 19.076,
+          longitude: 72.8777,
+          city: 'Mumbai',
+          country: 'India',
+        ),
+      );
+      final weatherClient = WeatherApiClient(
+        client: MockClient((req) async {
+          final isMumbai = req.url.queryParameters['latitude'] == '19.08' &&
+              req.url.queryParameters['longitude'] == '72.88';
+          return http.Response(
+            jsonEncode({
+              'current': {
+                'temperature_2m': isMumbai ? 34.0 : 22.0,
+                'relative_humidity_2m': 55,
+                'apparent_temperature': isMumbai ? 36.0 : 22.0,
+              }
+            }),
+            200,
+          );
+        }),
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(AsyncData(db)),
+            intakeLogRepositoryProvider.overrideWithValue(AsyncData(intakeRepo)),
+            userProfileRepositoryProvider.overrideWithValue(AsyncData(userRepo)),
+            notificationServiceProvider
+                .overrideWithValue(_IdleNotificationService()),
+            locationServiceProvider.overrideWithValue(gpsSpy),
+            ipLocationServiceProvider.overrideWithValue(ipStub),
+            weatherApiClientProvider.overrideWithValue(weatherClient),
+          ],
+          child: const HydroChimeApp(),
+        ),
+      );
+
+      for (var i = 0; i < 6; i++) {
+        await settleAsync(tester);
+      }
+
+      expect(gpsSpy.requestedFlags, [true]);
+      expect(ipStub.calls, 1);
+      expect(find.text('Mumbai (IP) • 34°C'), findsOneWidget);
+
+      final savedProfile = await tester.runAsync(() => userRepo.getUserProfile());
+      expect(savedProfile!.cityName, 'Mumbai (IP)');
+      expect(savedProfile.locationMode, LocationMode.ip);
 
       // Unmount and flush any final sqflite lock timers cleanly
       await tester.pumpWidget(const SizedBox());

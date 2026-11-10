@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -8,9 +9,12 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:hydrochime/data/database/app_database.dart';
 import 'package:hydrochime/data/repositories/weather_repository.dart';
+import 'package:hydrochime/data/services/ip_location_service.dart';
 import 'package:hydrochime/data/services/local_notification_service.dart';
+import 'package:hydrochime/data/services/location_service.dart';
 import 'package:hydrochime/data/services/vault_transfer_service.dart';
 import 'package:hydrochime/data/services/weather_api_client.dart';
+import 'package:hydrochime/domain/models/user_profile.dart';
 import 'package:hydrochime/domain/services/notification_scheduler.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:share_plus/share_plus.dart';
@@ -23,6 +27,33 @@ class _MockNotificationsPlugin extends Mock
 
 class _MockAndroidPlugin extends Mock
     implements AndroidFlutterLocalNotificationsPlugin {}
+
+class _StubGpsService implements PermissionAwareLocationService {
+  final Future<({double latitude, double longitude})> Function(
+    bool requestPermission,
+  ) handler;
+
+  _StubGpsService(this.handler);
+
+  @override
+  Future<({double latitude, double longitude})> getCurrentCoordinates({
+    bool requestPermission = true,
+  }) =>
+      handler(requestPermission);
+}
+
+class _StubIpService implements IpLocationService {
+  final Future<IpLocationResult> Function() handler;
+  int calls = 0;
+
+  _StubIpService(this.handler);
+
+  @override
+  Future<IpLocationResult> lookupPublicIpLocation() {
+    calls++;
+    return handler();
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -264,6 +295,168 @@ void main() {
 
       verify(() => mockPlugin.cancelAll()).called(1);
       verifyNever(() => mockPlugin.cancelAllPendingNotifications());
+    });
+  });
+
+  group('HttpIpLocationService & LocationResolver Fallback (TDD)', () {
+    test('HttpIpLocationService parses ipwho.is and falls back to geojs and ipapi.co',
+        () async {
+      final primaryClient = MockClient((req) async {
+        expect(req.url.host, 'ipwho.is');
+        return http.Response(
+          jsonEncode({
+            'success': true,
+            'city': 'Bengaluru',
+            'region': 'Karnataka',
+            'country': 'India',
+            'latitude': 12.9716,
+            'longitude': 77.5946,
+          }),
+          200,
+        );
+      });
+      final primary = await HttpIpLocationService(client: primaryClient)
+          .lookupPublicIpLocation();
+      expect(primary.city, 'Bengaluru');
+      expect(primary.latitude, closeTo(12.9716, 0.0001));
+      expect(
+        primary.displayLabel(quantizedLat: 12.97, quantizedLon: 77.59),
+        'Bengaluru (IP)',
+      );
+
+      // Fail ipwho.is (rate limit/error), succeed on geojs string coordinates
+      final fallbackClient = MockClient((req) async {
+        if (req.url.host == 'ipwho.is') {
+          return http.Response(jsonEncode({'success': false}), 200);
+        }
+        if (req.url.host == 'get.geojs.io') {
+          return http.Response(
+            jsonEncode({
+              'city': 'Munich',
+              'region': 'Bavaria',
+              'country': 'Germany',
+              'latitude': '48.1351',
+              'longitude': '11.5820',
+            }),
+            200,
+          );
+        }
+        return http.Response('{}', 500);
+      });
+      final geoJsResult = await HttpIpLocationService(client: fallbackClient)
+          .lookupPublicIpLocation();
+      expect(geoJsResult.city, 'Munich');
+      expect(geoJsResult.latitude, closeTo(48.1351, 0.0001));
+      expect(geoJsResult.longitude, closeTo(11.582, 0.0001));
+
+      // Fail both ipwho.is & geojs (nil coords), succeed on ipapi.co
+      final thirdClient = MockClient((req) async {
+        if (req.url.host == 'ipapi.co') {
+          return http.Response(
+            jsonEncode({
+              'city': '',
+              'region': 'Ontario',
+              'country_name': 'Canada',
+              'latitude': 43.6532,
+              'longitude': -79.3832,
+            }),
+            200,
+          );
+        }
+        if (req.url.host == 'get.geojs.io') {
+          return http.Response(
+            jsonEncode({'latitude': 'nil', 'longitude': 'nil'}),
+            200,
+          );
+        }
+        return http.Response('err', 503);
+      });
+      final ipApiResult = await HttpIpLocationService(client: thirdClient)
+          .lookupPublicIpLocation();
+      expect(
+        ipApiResult.displayLabel(quantizedLat: 43.65, quantizedLon: -79.38),
+        'Ontario (IP)',
+      );
+
+      // All failing -> throws LocationLookupException cleanly
+      final failingClient = MockClient((_) async => http.Response('down', 503));
+      await expectLater(
+        () => HttpIpLocationService(client: failingClient)
+            .lookupPublicIpLocation(),
+        throwsA(isA<LocationLookupException>()),
+      );
+    });
+
+    test('LocationResolver prefers GPS when granted and falls back to public IP when GPS denied or off',
+        () async {
+      bool? requestedFlag;
+      final ipStub = _StubIpService(() async {
+        return const IpLocationResult(
+          latitude: 19.0760,
+          longitude: 72.8777,
+          city: 'Mumbai',
+          country: 'India',
+        );
+      });
+
+      // 1) GPS granted -> uses quantized GPS without calling IP service
+      final gpsGrantedResolver = LocationResolver(
+        gpsService: _StubGpsService((reqPerm) async {
+          requestedFlag = reqPerm;
+          return (latitude: 37.42199, longitude: -122.08405);
+        }),
+        ipLocationService: ipStub,
+      );
+      final gpsLoc =
+          await gpsGrantedResolver.resolveLocation(requestGpsPermission: true);
+      expect(requestedFlag, isTrue);
+      expect(gpsLoc.source, ResolvedLocationSource.gps);
+      expect(gpsLoc.locationMode, LocationMode.gps);
+      expect(gpsLoc.name, 'GPS (37.42, -122.08)');
+      expect(ipStub.calls, 0);
+
+      // 2) GPS permission denied -> falls back seamlessly to Public IP
+      final deniedResolver = LocationResolver(
+        gpsService: _StubGpsService((_) async {
+          throw const LocationLookupException(
+            'Permission denied',
+            reason: LocationFailureReason.permissionDenied,
+          );
+        }),
+        ipLocationService: ipStub,
+      );
+      final ipLoc =
+          await deniedResolver.resolveLocation(requestGpsPermission: true);
+      expect(ipStub.calls, 1);
+      expect(ipLoc.source, ResolvedLocationSource.ip);
+      expect(ipLoc.locationMode, LocationMode.ip);
+      expect(ipLoc.name, 'Mumbai (IP)');
+      expect(ipLoc.latitude, 19.08);
+      expect(ipLoc.longitude, 72.88);
+      expect(ipLoc.gpsFailureReason, LocationFailureReason.permissionDenied);
+
+      // 3) Both GPS and IP fail -> throws informative LocationLookupException
+      final offlineResolver = LocationResolver(
+        gpsService: _StubGpsService((_) async {
+          throw const LocationLookupException(
+            'Denied',
+            reason: LocationFailureReason.permissionDenied,
+          );
+        }),
+        ipLocationService: _StubIpService(() async {
+          throw const LocationLookupException('No internet');
+        }),
+      );
+      await expectLater(
+        () => offlineResolver.resolveLocation(requestGpsPermission: true),
+        throwsA(
+          isA<LocationLookupException>().having(
+            (e) => e.message,
+            'message',
+            contains('GPS permission denied and public IP lookup failed'),
+          ),
+        ),
+      );
     });
   });
 }

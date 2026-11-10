@@ -63,6 +63,10 @@ class _HydroChimeAppState extends ConsumerState<HydroChimeApp>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _scheduleMidnightRollover();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(locationBootstrapProvider.notifier).resolveOnStartup();
+    });
   }
 
   @override
@@ -79,6 +83,7 @@ class _HydroChimeAppState extends ConsumerState<HydroChimeApp>
           .read(hydrationNotifierProvider.notifier)
           .refreshIfNewDay(now: _currentNow());
       _scheduleMidnightRollover();
+      ref.read(locationBootstrapProvider.notifier).retryIfFailedOnResume();
     }
   }
 

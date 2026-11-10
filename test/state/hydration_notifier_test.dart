@@ -7,11 +7,14 @@ import 'package:hydrochime/data/database/app_database.dart';
 import 'package:hydrochime/data/repositories/intake_log_repository.dart';
 import 'package:hydrochime/data/repositories/user_profile_repository.dart';
 import 'package:hydrochime/data/repositories/weather_repository.dart';
+import 'package:hydrochime/data/services/ip_location_service.dart';
 import 'package:hydrochime/data/services/local_notification_service.dart';
+import 'package:hydrochime/data/services/location_service.dart';
 import 'package:hydrochime/data/services/weather_api_client.dart';
 import 'package:hydrochime/domain/models/beverage_type.dart';
 import 'package:hydrochime/domain/models/climate_condition.dart';
 import 'package:hydrochime/domain/models/intake_log.dart';
+import 'package:hydrochime/domain/models/user_profile.dart';
 import 'package:hydrochime/domain/services/notification_scheduler.dart';
 import 'package:hydrochime/presentation/providers/hydration_providers.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -23,6 +26,35 @@ class TestClimateNotifier extends CurrentClimateNotifier {
       temperatureCelsius: 31.0,
       relativeHumidity: 38.0,
     );
+  }
+}
+
+class _RecordingGpsService implements PermissionAwareLocationService {
+  final List<bool> requestPermissionArgs = [];
+  Future<({double latitude, double longitude})> Function(bool requestPermission)
+      handler;
+
+  _RecordingGpsService(this.handler);
+
+  @override
+  Future<({double latitude, double longitude})> getCurrentCoordinates({
+    bool requestPermission = true,
+  }) {
+    requestPermissionArgs.add(requestPermission);
+    return handler(requestPermission);
+  }
+}
+
+class _StubIpLocationService implements IpLocationService {
+  Future<IpLocationResult> Function() handler;
+  int calls = 0;
+
+  _StubIpLocationService(this.handler);
+
+  @override
+  Future<IpLocationResult> lookupPublicIpLocation() {
+    calls++;
+    return handler();
   }
 }
 
@@ -455,6 +487,265 @@ void main() {
       );
       final after = await container.read(hydrationNotifierProvider.future);
       expect(after.currentVolumeMl, 300);
+    });
+  });
+
+  group('LocationBootstrapNotifier (GPS Permission + Public IP Fallback)', () {
+    test('requests GPS on auto startup and uses GPS coordinates for weather when granted',
+        () async {
+      final weatherDb = AppDatabase.inMemory();
+      final db = await weatherDb.database;
+      final profileRepo = UserProfileRepository(db);
+      final gpsSpy = _RecordingGpsService(
+        (_) async => (latitude: 47.6062, longitude: -122.3321),
+      );
+      final ipSpy = _StubIpLocationService(
+        () async => throw Exception('IP should not be called when GPS succeeds'),
+      );
+
+      String? requestedLat;
+      final weatherClient = WeatherApiClient(
+        client: MockClient((req) async {
+          requestedLat = req.url.queryParameters['latitude'];
+          return http.Response(
+            jsonEncode({
+              'current': {
+                'temperature_2m': 16.0,
+                'relative_humidity_2m': 78,
+                'apparent_temperature': 15.0,
+              }
+            }),
+            200,
+          );
+        }),
+      );
+
+      final bootContainer = ProviderContainer(
+        overrides: [
+          databaseProvider.overrideWithValue(AsyncData(db)),
+          intakeLogRepositoryProvider.overrideWithValue(
+            AsyncData(IntakeLogRepository(db)),
+          ),
+          userProfileRepositoryProvider.overrideWithValue(AsyncData(profileRepo)),
+          locationServiceProvider.overrideWithValue(gpsSpy),
+          ipLocationServiceProvider.overrideWithValue(ipSpy),
+          weatherApiClientProvider.overrideWithValue(weatherClient),
+        ],
+      );
+      addTearDown(() async {
+        bootContainer.dispose();
+        await weatherDb.close();
+      });
+
+      final state = await bootContainer
+          .read(locationBootstrapProvider.notifier)
+          .resolveOnStartup();
+      expect(state.status, StartupLocationStatus.resolvedGps);
+      expect(gpsSpy.requestPermissionArgs, [true]);
+      expect(ipSpy.calls, 0);
+
+      final saved = await profileRepo.getUserProfile();
+      expect(saved.cityName, 'GPS (47.61, -122.33)');
+      expect(saved.locationMode, LocationMode.gps);
+      expect(requestedLat, '47.61');
+      expect(
+        bootContainer.read(currentClimateProvider).temperatureCelsius,
+        16.0,
+      );
+    });
+
+    test('falls back to public IP when user denies GPS permission and fetches IP weather',
+        () async {
+      final weatherDb = AppDatabase.inMemory();
+      final db = await weatherDb.database;
+      final profileRepo = UserProfileRepository(db);
+      final gpsSpy = _RecordingGpsService((_) async {
+        throw const LocationLookupException(
+          'Denied by user',
+          reason: LocationFailureReason.permissionDenied,
+        );
+      });
+      final ipSpy = _StubIpLocationService(
+        () async => const IpLocationResult(
+          latitude: 12.9716,
+          longitude: 77.5946,
+          city: 'Bengaluru',
+          region: 'Karnataka',
+          country: 'India',
+        ),
+      );
+
+      String? fetchedLat;
+      String? fetchedLon;
+      final weatherClient = WeatherApiClient(
+        client: MockClient((req) async {
+          fetchedLat = req.url.queryParameters['latitude'];
+          fetchedLon = req.url.queryParameters['longitude'];
+          return http.Response(
+            jsonEncode({
+              'current': {
+                'temperature_2m': 32.0,
+                'relative_humidity_2m': 48,
+                'apparent_temperature': 34.0,
+              }
+            }),
+            200,
+          );
+        }),
+      );
+
+      final bootContainer = ProviderContainer(
+        overrides: [
+          databaseProvider.overrideWithValue(AsyncData(db)),
+          intakeLogRepositoryProvider.overrideWithValue(
+            AsyncData(IntakeLogRepository(db)),
+          ),
+          userProfileRepositoryProvider.overrideWithValue(AsyncData(profileRepo)),
+          locationServiceProvider.overrideWithValue(gpsSpy),
+          ipLocationServiceProvider.overrideWithValue(ipSpy),
+          weatherApiClientProvider.overrideWithValue(weatherClient),
+        ],
+      );
+      addTearDown(() async {
+        bootContainer.dispose();
+        await weatherDb.close();
+      });
+
+      final state = await bootContainer
+          .read(locationBootstrapProvider.notifier)
+          .resolveOnStartup();
+      expect(state.status, StartupLocationStatus.resolvedIp);
+      expect(gpsSpy.requestPermissionArgs, [true]);
+      expect(ipSpy.calls, 1);
+
+      final saved = await profileRepo.getUserProfile();
+      expect(saved.cityName, 'Bengaluru (IP)');
+      expect(saved.locationMode, LocationMode.ip);
+      expect(saved.latitude, 12.97);
+      expect(saved.longitude, 77.59);
+      expect(fetchedLat, '12.97');
+      expect(fetchedLon, '77.59');
+
+      expect(
+        bootContainer.read(currentClimateProvider).temperatureCelsius,
+        32.0,
+      );
+      // Verify HydrationNotifier updated daily target for 32C Bengaluru weather (2450 * 1.30 = 3185)
+      final hydration = await bootContainer.read(hydrationNotifierProvider.future);
+      expect(hydration.targetVolumeMl, 3185);
+    });
+
+    test('skips GPS prompt when manual city selected and avoids re-prompting on resume retry',
+        () async {
+      final weatherDb = AppDatabase.inMemory();
+      final db = await weatherDb.database;
+      final profileRepo = UserProfileRepository(db);
+      await profileRepo.updateLocation('Kyoto', 35.01, 135.77);
+
+      final gpsSpy = _RecordingGpsService((_) async => (latitude: 0.0, longitude: 0.0));
+      final ipSpy = _StubIpLocationService(
+        () async => const IpLocationResult(
+          latitude: 19.08,
+          longitude: 72.88,
+          city: 'Mumbai',
+        ),
+      );
+
+      final manualContainer = ProviderContainer(
+        overrides: [
+          databaseProvider.overrideWithValue(AsyncData(db)),
+          intakeLogRepositoryProvider.overrideWithValue(
+            AsyncData(IntakeLogRepository(db)),
+          ),
+          userProfileRepositoryProvider.overrideWithValue(AsyncData(profileRepo)),
+          locationServiceProvider.overrideWithValue(gpsSpy),
+          ipLocationServiceProvider.overrideWithValue(ipSpy),
+          weatherApiClientProvider.overrideWithValue(
+            WeatherApiClient(client: MockClient((_) async => throw Exception('offline'))),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        manualContainer.dispose();
+        await weatherDb.close();
+      });
+
+      final manualState = await manualContainer
+          .read(locationBootstrapProvider.notifier)
+          .resolveOnStartup();
+      expect(manualState.status, StartupLocationStatus.manualSkipped);
+      expect(gpsSpy.requestPermissionArgs, isEmpty);
+      expect(ipSpy.calls, 0);
+
+      // Simulate offline startup failure followed by network recovery on resume
+      final recoveryDb = AppDatabase.inMemory();
+      final rDb = await recoveryDb.database;
+      final recoveryProfileRepo = UserProfileRepository(rDb);
+      bool online = false;
+      final retryGps = _RecordingGpsService((_) async {
+        throw const LocationLookupException(
+          'Denied',
+          reason: LocationFailureReason.permissionDenied,
+        );
+      });
+      final retryIp = _StubIpLocationService(() async {
+        if (!online) throw const LocationLookupException('Offline');
+        return const IpLocationResult(
+          latitude: 19.076,
+          longitude: 72.877,
+          city: 'Mumbai',
+        );
+      });
+      final retryContainer = ProviderContainer(
+        overrides: [
+          databaseProvider.overrideWithValue(AsyncData(rDb)),
+          intakeLogRepositoryProvider.overrideWithValue(
+            AsyncData(IntakeLogRepository(rDb)),
+          ),
+          userProfileRepositoryProvider
+              .overrideWithValue(AsyncData(recoveryProfileRepo)),
+          locationServiceProvider.overrideWithValue(retryGps),
+          ipLocationServiceProvider.overrideWithValue(retryIp),
+          weatherApiClientProvider.overrideWithValue(
+            WeatherApiClient(
+              client: MockClient(
+                (_) async => http.Response(
+                  jsonEncode({
+                    'current': {
+                      'temperature_2m': 30.0,
+                      'relative_humidity_2m': 60,
+                      'apparent_temperature': 32.0,
+                    }
+                  }),
+                  200,
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        retryContainer.dispose();
+        await recoveryDb.close();
+      });
+
+      final firstAttempt = await retryContainer
+          .read(locationBootstrapProvider.notifier)
+          .resolveOnStartup();
+      expect(firstAttempt.status, StartupLocationStatus.failed);
+      expect(retryGps.requestPermissionArgs, [true]);
+
+      online = true;
+      final resumedState = await retryContainer
+          .read(locationBootstrapProvider.notifier)
+          .retryIfFailedOnResume();
+      expect(resumedState.status, StartupLocationStatus.resolvedIp);
+      // Should NOT double-prompt GPS permission in the same session!
+      expect(retryGps.requestPermissionArgs, [true, false]);
+      expect(
+        (await recoveryProfileRepo.getUserProfile()).cityName,
+        'Mumbai (IP)',
+      );
     });
   });
 }

@@ -65,14 +65,16 @@ class UserProfileRepository {
   Future<void> updateLocation(
     String cityName,
     double latitude,
-    double longitude,
-  ) async {
+    double longitude, {
+    LocationMode locationMode = LocationMode.manual,
+  }) async {
     final profile = await getUserProfile();
     await updateProfile(
       profile.copyWith(
         cityName: cityName,
         latitude: latitude,
         longitude: longitude,
+        locationMode: locationMode,
       ),
     );
   }

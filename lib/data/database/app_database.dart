@@ -28,7 +28,7 @@ class AppDatabase {
 
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       singleInstance: !isInMemory,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
@@ -49,7 +49,8 @@ class AppDatabase {
         is_dark_mode INTEGER NOT NULL DEFAULT 1,
         city_name TEXT NOT NULL DEFAULT 'Austin',
         latitude REAL NOT NULL DEFAULT 30.27,
-        longitude REAL NOT NULL DEFAULT -97.74
+        longitude REAL NOT NULL DEFAULT -97.74,
+        location_mode TEXT NOT NULL DEFAULT 'auto'
       )
     ''');
 
@@ -159,6 +160,21 @@ class AppDatabase {
             'ALTER TABLE weather_cache ADD COLUMN longitude REAL',
           );
         }
+      }
+    }
+    if (oldVersion < 4 && newVersion >= 4) {
+      final cols = await db.rawQuery("PRAGMA table_info('user_profile')");
+      final colNames = cols.map((c) => c['name'] as String).toSet();
+      if (!colNames.contains('location_mode')) {
+        await db.execute(
+          "ALTER TABLE user_profile ADD COLUMN location_mode TEXT NOT NULL DEFAULT 'auto'",
+        );
+        await db.execute(
+          "UPDATE user_profile SET location_mode = 'manual' "
+          "WHERE city_name != 'Austin' "
+          'OR ABS(latitude - 30.27) > 0.02 '
+          'OR ABS(longitude - (-97.74)) > 0.02',
+        );
       }
     }
   }

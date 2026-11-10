@@ -670,13 +670,11 @@ class _ClimateTuneSheetState extends ConsumerState<_ClimateTuneSheet> {
         _hydratedActivityFromProfile = true;
       }
       if (!_hydratedCityFromProfile && !_userEditedCity) {
-        _selectedCity = kDefaultCityPresets.firstWhere(
-          (c) => c.name == profile.cityName,
-          orElse: () => LocationSelection(
-            profile.cityName,
-            profile.latitude,
-            profile.longitude,
-          ),
+        _selectedCity = LocationSelection(
+          profile.cityName,
+          profile.latitude,
+          profile.longitude,
+          mode: profile.locationMode,
         );
         _hydratedCityFromProfile = true;
       }
@@ -836,6 +834,7 @@ class _ClimateTuneSheetState extends ConsumerState<_ClimateTuneSheet> {
                                 _selectedCity.name,
                                 _selectedCity.latitude,
                                 _selectedCity.longitude,
+                                locationMode: _selectedCity.mode,
                               );
                               widget.rootRef.invalidate(userProfileProvider);
                               await widget.rootRef

@@ -9,6 +9,7 @@ import 'package:hydrochime/core/theme/app_theme.dart';
 import 'package:hydrochime/data/database/app_database.dart';
 import 'package:hydrochime/data/repositories/intake_log_repository.dart';
 import 'package:hydrochime/data/repositories/user_profile_repository.dart';
+import 'package:hydrochime/data/services/ip_location_service.dart';
 import 'package:hydrochime/data/services/local_notification_service.dart';
 import 'package:hydrochime/data/services/location_service.dart';
 import 'package:hydrochime/data/services/vault_export_service.dart';
@@ -17,6 +18,7 @@ import 'package:hydrochime/data/services/weather_api_client.dart';
 import 'package:hydrochime/domain/models/beverage_type.dart';
 import 'package:hydrochime/domain/models/climate_condition.dart';
 import 'package:hydrochime/domain/models/intake_log.dart';
+import 'package:hydrochime/domain/models/user_profile.dart';
 import 'package:hydrochime/domain/services/notification_scheduler.dart';
 import 'package:hydrochime/presentation/providers/analytics_provider.dart';
 import 'package:hydrochime/presentation/providers/hydration_providers.dart';
@@ -40,6 +42,26 @@ class _FakeLocationService implements LocationService {
   @override
   Future<({double latitude, double longitude})> getCurrentCoordinates() async =>
       coords;
+}
+
+class _DeniedGpsLocationService implements PermissionAwareLocationService {
+  @override
+  Future<({double latitude, double longitude})> getCurrentCoordinates({
+    bool requestPermission = true,
+  }) async {
+    throw const LocationLookupException(
+      'Location permission denied by user.',
+      reason: LocationFailureReason.permissionDenied,
+    );
+  }
+}
+
+class _FakeIpLocationService implements IpLocationService {
+  final IpLocationResult result;
+  _FakeIpLocationService(this.result);
+
+  @override
+  Future<IpLocationResult> lookupPublicIpLocation() async => result;
 }
 
 class _FakeVaultTransferService implements VaultTransferService {
@@ -162,6 +184,7 @@ void main() {
     ),
     WeatherApiClient? weatherApiClient,
     LocationService? locationService,
+    IpLocationService? ipLocationService,
     VaultTransferService? vaultTransferService,
     VaultExportService? vaultExportService,
     NotificationService? notificationService,
@@ -179,6 +202,8 @@ void main() {
           weatherApiClientProvider.overrideWithValue(weatherApiClient),
         if (locationService != null)
           locationServiceProvider.overrideWithValue(locationService),
+        if (ipLocationService != null)
+          ipLocationServiceProvider.overrideWithValue(ipLocationService),
         if (vaultTransferService != null)
           vaultTransferServiceProvider.overrideWithValue(vaultTransferService),
         if (vaultExportService != null)
@@ -978,6 +1003,78 @@ void main() {
       await settleWhileSaving(tester);
       await settleAsync(tester);
       expect(forecastCalls - callsBeforeLocationSwitch, 1);
+      expectNoException(tester);
+    });
+
+    testWidgets('tapping GPS when permission is denied falls back to public IP and syncs weather',
+        (tester) async {
+      tester.view.physicalSize = const Size(800, 1400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final requestedCoords = <({String? lat, String? lon})>[];
+      final weatherClient = WeatherApiClient(
+        client: MockClient((req) async {
+          requestedCoords.add((
+            lat: req.url.queryParameters['latitude'],
+            lon: req.url.queryParameters['longitude'],
+          ));
+          return http.Response(
+            jsonEncode({
+              'current': {
+                'temperature_2m': 29.0,
+                'relative_humidity_2m': 68,
+                'apparent_temperature': 32.0,
+              }
+            }),
+            200,
+          );
+        }),
+      );
+
+      await tester.pumpWidget(
+        buildApp(
+          const SettingsScreen(),
+          climate: null,
+          weatherApiClient: weatherClient,
+          locationService: _DeniedGpsLocationService(),
+          ipLocationService: _FakeIpLocationService(
+            const IpLocationResult(
+              latitude: 19.076,
+              longitude: 72.8777,
+              city: 'Mumbai',
+              country: 'India',
+            ),
+          ),
+        ),
+      );
+      await settleWhileSaving(tester);
+      await settleAsync(tester);
+
+      await tester.ensureVisible(find.byKey(const Key('settings_location_row')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('settings_location_row')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('gps_location_button')));
+      await settleWhileSaving(tester);
+      expect(
+        find.text('GPS permission not granted — located via public IP.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Mumbai (IP)'), findsOneWidget);
+
+      await tester.tap(find.text('Save Location'));
+      await settleWhileSaving(tester);
+      await settleAsync(tester);
+
+      final savedProfile = await tester.runAsync(() => userRepo.getUserProfile());
+      expect(savedProfile!.cityName, 'Mumbai (IP)');
+      expect(savedProfile.locationMode, LocationMode.ip);
+      expect(savedProfile.latitude, 19.08);
+      expect(savedProfile.longitude, 72.88);
+      expect(requestedCoords, contains((lat: '19.08', lon: '72.88')));
+      expect(find.text('Mumbai (IP) • 29°C'), findsOneWidget);
       expectNoException(tester);
     });
   });

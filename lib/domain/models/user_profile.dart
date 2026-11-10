@@ -1,3 +1,20 @@
+enum LocationMode {
+  auto('auto'),
+  gps('gps'),
+  ip('ip'),
+  manual('manual');
+
+  final String value;
+  const LocationMode(this.value);
+
+  static LocationMode fromValue(String? raw) {
+    return LocationMode.values.firstWhere(
+      (mode) => mode.value == raw,
+      orElse: () => LocationMode.auto,
+    );
+  }
+}
+
 class UserProfile {
   static const Object _unset = Object();
 
@@ -12,6 +29,7 @@ class UserProfile {
   final String cityName;
   final double latitude;
   final double longitude;
+  final LocationMode locationMode;
 
   const UserProfile({
     required this.weightKg,
@@ -25,6 +43,7 @@ class UserProfile {
     this.cityName = 'Austin',
     this.latitude = 30.27,
     this.longitude = -97.74,
+    this.locationMode = LocationMode.auto,
   });
 
   int get effectiveBaselineMl => customBaselineMl ?? (weightKg * 35).round();
@@ -41,6 +60,7 @@ class UserProfile {
     String? cityName,
     double? latitude,
     double? longitude,
+    LocationMode? locationMode,
   }) {
     return UserProfile(
       weightKg: weightKg ?? this.weightKg,
@@ -58,6 +78,7 @@ class UserProfile {
       cityName: cityName ?? this.cityName,
       latitude: latitude ?? this.latitude,
       longitude: longitude ?? this.longitude,
+      locationMode: locationMode ?? this.locationMode,
     );
   }
 
@@ -75,10 +96,25 @@ class UserProfile {
       'city_name': cityName,
       'latitude': latitude,
       'longitude': longitude,
+      'location_mode': locationMode.value,
     };
   }
 
   factory UserProfile.fromMap(Map<String, dynamic> map) {
+    final cityName = (map['city_name'] as String?) ?? 'Austin';
+    final latitude = (map['latitude'] as num?)?.toDouble() ?? 30.27;
+    final longitude = (map['longitude'] as num?)?.toDouble() ?? -97.74;
+    final rawMode = map['location_mode'] as String?;
+    final LocationMode mode;
+    if (rawMode != null && rawMode.isNotEmpty) {
+      mode = LocationMode.fromValue(rawMode);
+    } else {
+      final isDefaultCoords = cityName == 'Austin' &&
+          (latitude - 30.27).abs() <= 0.02 &&
+          (longitude - (-97.74)).abs() <= 0.02;
+      mode = isDefaultCoords ? LocationMode.auto : LocationMode.manual;
+    }
+
     return UserProfile(
       weightKg: (map['weight_kg'] as num).toDouble(),
       customBaselineMl: map['custom_baseline_ml'] as int?,
@@ -88,9 +124,10 @@ class UserProfile {
       weatherAdaptationEnabled: (map['weather_adaptation_enabled'] as int) == 1,
       mindfulPacingEnabled: (map['mindful_pacing_enabled'] as int) == 1,
       isDarkMode: ((map['is_dark_mode'] as int?) ?? 1) == 1,
-      cityName: (map['city_name'] as String?) ?? 'Austin',
-      latitude: (map['latitude'] as num?)?.toDouble() ?? 30.27,
-      longitude: (map['longitude'] as num?)?.toDouble() ?? -97.74,
+      cityName: cityName,
+      latitude: latitude,
+      longitude: longitude,
+      locationMode: mode,
     );
   }
 
@@ -106,5 +143,6 @@ class UserProfile {
     cityName: 'Austin',
     latitude: 30.27,
     longitude: -97.74,
+    locationMode: LocationMode.auto,
   );
 }

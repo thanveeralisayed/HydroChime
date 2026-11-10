@@ -3,14 +3,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../data/services/location_service.dart';
 import '../../data/services/weather_api_client.dart';
+import '../../domain/models/user_profile.dart';
 import '../providers/hydration_providers.dart';
 
 class LocationSelection {
   final String name;
   final double latitude;
   final double longitude;
+  final LocationMode mode;
 
-  const LocationSelection(this.name, this.latitude, this.longitude);
+  const LocationSelection(
+    this.name,
+    this.latitude,
+    this.longitude, {
+    this.mode = LocationMode.manual,
+  });
 }
 
 const List<LocationSelection> kDefaultCityPresets = [
@@ -45,6 +52,7 @@ class _LocationPickerSectionState extends ConsumerState<LocationPickerSection> {
   bool _searchingCity = false;
   List<GeocodedLocation> _searchResults = const [];
   String? _statusError;
+  String? _statusInfo;
 
   @override
   void dispose() {
@@ -56,29 +64,40 @@ class _LocationPickerSectionState extends ConsumerState<LocationPickerSection> {
     setState(() {
       _locatingGps = true;
       _statusError = null;
+      _statusInfo = null;
     });
     try {
-      final coords = await widget.rootRef
-          .read(locationServiceProvider)
-          .getCurrentCoordinates();
+      final resolved = await widget.rootRef
+          .read(locationResolverProvider)
+          .resolveLocation(requestGpsPermission: true);
       if (!mounted) return;
-      final apiClient = widget.rootRef.read(weatherApiClientProvider);
-      final quantized = apiClient.anonymizeCoordinates(
-        coords.latitude,
-        coords.longitude,
-      );
+      final infoMessage = resolved.source == ResolvedLocationSource.ip
+          ? switch (resolved.gpsFailureReason) {
+              LocationFailureReason.permissionDenied ||
+              LocationFailureReason.permissionDeniedForever =>
+                'GPS permission not granted — located via public IP.',
+              LocationFailureReason.serviceDisabled =>
+                'Device GPS is off — located via public IP.',
+              _ => 'GPS unavailable — located via public IP.',
+            }
+          : null;
+      setState(() => _statusInfo = infoMessage);
       widget.onSelected(
         LocationSelection(
-          'GPS (${quantized.latitude.toStringAsFixed(2)}, ${quantized.longitude.toStringAsFixed(2)})',
-          quantized.latitude,
-          quantized.longitude,
+          resolved.name,
+          resolved.latitude,
+          resolved.longitude,
+          mode: resolved.locationMode,
         ),
       );
     } on LocationLookupException catch (e) {
       if (mounted) setState(() => _statusError = e.message);
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
-        setState(() => _statusError = 'Unable to acquire GPS coordinates.');
+        setState(
+          () => _statusError =
+              'Unable to detect GPS or public IP location.',
+        );
       }
     } finally {
       if (mounted) setState(() => _locatingGps = false);
@@ -88,13 +107,17 @@ class _LocationPickerSectionState extends ConsumerState<LocationPickerSection> {
   Future<void> _runCitySearch() async {
     final query = _searchController.text.trim();
     if (query.length < 2) {
-      setState(() => _statusError = 'Enter at least 2 characters to search.');
+      setState(() {
+        _statusInfo = null;
+        _statusError = 'Enter at least 2 characters to search.';
+      });
       return;
     }
 
     setState(() {
       _searchingCity = true;
       _statusError = null;
+      _statusInfo = null;
     });
     try {
       final results = await widget.rootRef
@@ -199,6 +222,13 @@ class _LocationPickerSectionState extends ConsumerState<LocationPickerSection> {
             ),
           ],
         ),
+        if (_statusInfo != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            _statusInfo!,
+            style: TextStyle(color: palette.primaryAtmosphere, fontSize: 11),
+          ),
+        ],
         if (_statusError != null) ...[
           const SizedBox(height: 6),
           Text(
@@ -230,11 +260,16 @@ class _LocationPickerSectionState extends ConsumerState<LocationPickerSection> {
                 backgroundColor: palette.surfaceCard,
                 side: BorderSide(color: palette.borderSubtle),
                 onSelected: (_) {
+                  setState(() {
+                    _statusError = null;
+                    _statusInfo = null;
+                  });
                   widget.onSelected(
                     LocationSelection(
                       hit.name,
                       hit.latitude,
                       hit.longitude,
+                      mode: LocationMode.manual,
                     ),
                   );
                 },
@@ -262,7 +297,13 @@ class _LocationPickerSectionState extends ConsumerState<LocationPickerSection> {
               selectedColor: palette.primaryVital,
               backgroundColor: palette.surfaceCard,
               side: BorderSide(color: palette.borderSubtle),
-              onSelected: (_) => widget.onSelected(city),
+              onSelected: (_) {
+                setState(() {
+                  _statusError = null;
+                  _statusInfo = null;
+                });
+                widget.onSelected(city);
+              },
             );
           }).toList(),
         ),

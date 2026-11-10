@@ -4,6 +4,7 @@ import 'package:hydrochime/data/repositories/intake_log_repository.dart';
 import 'package:hydrochime/data/repositories/user_profile_repository.dart';
 import 'package:hydrochime/domain/models/beverage_type.dart';
 import 'package:hydrochime/domain/models/intake_log.dart';
+import 'package:hydrochime/domain/models/user_profile.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -324,6 +325,74 @@ void main() {
       final colNames = cols.map((c) => c['name'] as String).toSet();
       expect(colNames.contains('latitude'), isTrue);
       expect(colNames.contains('longitude'), isTrue);
+    });
+
+    test('migrates v3 user_profile to v4 location_mode preserving custom cities as manual and default Austin as auto',
+        () async {
+      Future<Database> createV3Db({
+        required String city,
+        required double lat,
+        required double lon,
+      }) async {
+        return await openDatabase(
+          inMemoryDatabasePath,
+          version: 3,
+          singleInstance: false,
+          onCreate: (db, _) async {
+            await db.execute('''
+              CREATE TABLE user_profile (
+                id INTEGER PRIMARY KEY,
+                weight_kg REAL NOT NULL,
+                custom_baseline_ml INTEGER,
+                daily_activity_minutes INTEGER NOT NULL DEFAULT 0,
+                active_window_start_hour INTEGER NOT NULL,
+                active_window_end_hour INTEGER NOT NULL,
+                weather_adaptation_enabled INTEGER NOT NULL,
+                mindful_pacing_enabled INTEGER NOT NULL,
+                is_dark_mode INTEGER NOT NULL DEFAULT 1,
+                city_name TEXT NOT NULL DEFAULT 'Austin',
+                latitude REAL NOT NULL DEFAULT 30.27,
+                longitude REAL NOT NULL DEFAULT -97.74
+              )
+            ''');
+            await db.insert('user_profile', {
+              'id': 1,
+              'weight_kg': 70.0,
+              'daily_activity_minutes': 0,
+              'active_window_start_hour': 7,
+              'active_window_end_hour': 22,
+              'weather_adaptation_enabled': 1,
+              'mindful_pacing_enabled': 1,
+              'is_dark_mode': 1,
+              'city_name': city,
+              'latitude': lat,
+              'longitude': lon,
+            });
+          },
+        );
+      }
+
+      final defaultDb = await createV3Db(
+        city: 'Austin',
+        lat: 30.27,
+        lon: -97.74,
+      );
+      await AppDatabase.migrateDatabaseForTest(defaultDb, 3, 4);
+      final defaultProfile =
+          await UserProfileRepository(defaultDb).getUserProfile();
+      expect(defaultProfile.locationMode, LocationMode.auto);
+      await defaultDb.close();
+
+      final customDb = await createV3Db(
+        city: 'Tokyo',
+        lat: 35.68,
+        lon: 139.77,
+      );
+      await AppDatabase.migrateDatabaseForTest(customDb, 3, 4);
+      final customProfile =
+          await UserProfileRepository(customDb).getUserProfile();
+      expect(customProfile.locationMode, LocationMode.manual);
+      await customDb.close();
     });
   });
 }

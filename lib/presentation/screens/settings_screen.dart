@@ -84,7 +84,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
         content: Text(
           'HydroChime stores your intake logs, body metrics, and pacing preferences strictly inside local encrypted-grade SQLite storage on your device.\n\n'
-          'No account, telemetry SDK, or cloud sync is used. Weather fetches anonymize coordinates to 2 decimal places (~1.1 km).',
+          'No account, telemetry SDK, or cloud sync is used. Weather fetches anonymize coordinates to 2 decimal places (~1.1 km). If GPS permission is declined, your approximate location is resolved via public IP to fetch local weather.',
           style: TextStyle(color: palette.textSecondary, fontSize: 13, height: 1.5),
         ),
         actions: [
@@ -621,7 +621,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                               ),
                               const SizedBox(width: 4),
                               Icon(
-                                Icons.my_location,
+                                switch (profile.locationMode) {
+                                  LocationMode.gps ||
+                                  LocationMode.auto =>
+                                    Icons.my_location,
+                                  LocationMode.ip => Icons.public,
+                                  LocationMode.manual =>
+                                    Icons.location_on_outlined,
+                                },
                                 size: 13,
                                 color: palette.primaryAtmosphere,
                               ),
@@ -1119,14 +1126,23 @@ class _SettingsLocationSheetState extends State<_SettingsLocationSheet> {
   @override
   void initState() {
     super.initState();
-    _selected = kDefaultCityPresets.firstWhere(
-      (c) => c.name == widget.profile.cityName,
-      orElse: () => LocationSelection(
-        widget.profile.cityName,
-        widget.profile.latitude,
-        widget.profile.longitude,
-      ),
+    _selected = LocationSelection(
+      widget.profile.cityName,
+      widget.profile.latitude,
+      widget.profile.longitude,
+      mode: widget.profile.locationMode,
     );
+  }
+
+  String _sourceLabel(LocationMode mode) {
+    return switch (mode) {
+      LocationMode.gps => 'Source: Device GPS (~1.1 km quantized)',
+      LocationMode.ip =>
+        'Source: Public IP fallback (GPS permission not granted)',
+      LocationMode.manual => 'Source: Selected city',
+      LocationMode.auto =>
+        'Source: Automatic (GPS with public IP fallback)',
+    };
   }
 
   @override
@@ -1161,6 +1177,15 @@ class _SettingsLocationSheetState extends State<_SettingsLocationSheet> {
                 Text(
                   'Quantized to 0.01° (~1.1 km) for on-device weather privacy.',
                   style: TextStyle(color: palette.textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _sourceLabel(_selected.mode),
+                  style: TextStyle(
+                    color: palette.primaryAtmosphere,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
                 const SizedBox(height: 16),
                 LocationPickerSection(
@@ -1216,6 +1241,7 @@ class _SettingsLocationSheetState extends State<_SettingsLocationSheet> {
                                 _selected.name,
                                 _selected.latitude,
                                 _selected.longitude,
+                                locationMode: _selected.mode,
                               );
                               widget.rootRef.invalidate(userProfileProvider);
                               await widget.rootRef
