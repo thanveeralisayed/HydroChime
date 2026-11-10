@@ -109,6 +109,6 @@ GitHub Actions workflow [`.github/workflows/release-apk.yml`](.github/workflows/
 1. Runs `flutter pub get`, `flutter analyze`, and `flutter test` using Flutter `3.47.9`.
 2. Sets up Temurin Java 17 and provisions Android SDK licenses / `platforms;android-37.0` / `build-tools;36.0.0`.
 3. Builds `build/app/outputs/flutter-apk/app-release.apk` with `flutter build apk --release`.
-4. Uploads the APK as the `hydrochime-release-apk` workflow artifact (30-day retention) with size and SHA-256 summary.
+4. Uploads the APK as the `hydrochime-release-apk` workflow artifact (30-day retention) and updates the rolling **`latest`** pre-release (`HydroChime Latest`) on GitHub Releases with `HydroChime-latest.apk`, size, and SHA-256 summary whenever built from `main`.
 
 > **Signing note:** [`android/app/build.gradle.kts`](android/app/build.gradle.kts) currently uses debug signing keys for `buildTypes.release` so local and CI APKs build out of the box for sideloading/testing. Configure a release keystore and Gradle signing secrets before publishing to the Play Store.

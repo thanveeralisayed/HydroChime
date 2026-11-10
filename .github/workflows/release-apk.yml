@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -80,12 +80,20 @@ jobs:
       - name: Build Android release APK
         run: flutter build apk --release
 
-      - name: Write APK build summary
+      - name: Prepare release APK & build summary
+        id: apk_meta
         shell: bash
         run: |
           APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+          RELEASE_APK_PATH="build/app/outputs/flutter-apk/HydroChime-latest.apk"
+          cp "$APK_PATH" "$RELEASE_APK_PATH"
           APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
           APK_SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
+          {
+            echo "apk_size=$APK_SIZE"
+            echo "apk_sha256=$APK_SHA256"
+            echo "release_apk_path=$RELEASE_APK_PATH"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "## HydroChime Release APK"
             echo ""
@@ -103,4 +111,31 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Update rolling latest tag
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f latest "${GITHUB_SHA}"
+          git push -f origin refs/tags/latest
+
+      - name: Publish rolling pre-release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: latest
+          target_commitish: ${{ github.sha }}
+          name: HydroChime Latest
+          prerelease: true
+          overwrite_files: true
+          append_body: false
+          body: |
+            Automated rolling pre-release built from `main`.
+
+            - **Commit:** `${{ github.sha }}`
+            - **APK:** `HydroChime-latest.apk` (`${{ steps.apk_meta.outputs.apk_size }}`)
+            - **SHA-256:** `${{ steps.apk_meta.outputs.apk_sha256 }}`
+          files: ${{ steps.apk_meta.outputs.release_apk_path }}
 
